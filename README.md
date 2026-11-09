@@ -43,9 +43,21 @@ python main.py
 1. Run the app
 2. Enter your API ID, API Hash and phone number
 3. Click **Login** — enter the OTP sent to your Telegram app
-4. Select a channel or group from the dropdown
+4. Search and select a channel or group in the left panel
 5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel).
 6. Click **Start**
+
+## Desktop layout
+
+Wide windows show channels and topics on the left and download settings on the
+right. The topic list grows with the window; settings scroll independently when
+needed. Below 1040 pixels wide, use the Channels & topics / Download settings
+switch to move between panels. Your selections stay in place when resizing.
+
+Use Hide login after signing in to free space. Activity has Log and History tabs
+and can also be hidden. On shorter screens it starts collapsed; choose Show
+activity to open it. Progress and Start / Pause / Cancel stay visible at the
+bottom of the window.
 
 ## Privacy
 
