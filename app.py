@@ -15,6 +15,9 @@ class App(ctk.CTk):
         self.title("Telegram Media Downloader")
         self.geometry(f"780x{min(900, self.winfo_screenheight() - 100)}")
         self.resizable(True, True)
+        self.minsize(620, 540)
+        self.topic_checks = {}
+        self.media_checks = {}
         self.downloader = None
         self.loop = None
         self.channels = []
@@ -40,7 +43,7 @@ class App(ctk.CTk):
             row.pack(fill="x", padx=10, pady=2)
             ctk.CTkLabel(row, text=label, width=80).pack(side="left")
             entry = ctk.CTkEntry(row, width=350, placeholder_text=placeholder, show="*" if attr in ("api_hash", "phone") else "")
-            entry.pack(side="left", padx=5)
+            entry.pack(side="left", padx=5, fill="x", expand=True)
             setattr(self, attr, entry)
 
         login_row = ctk.CTkFrame(cred, fg_color="transparent")
@@ -59,12 +62,29 @@ class App(ctk.CTk):
         ctk.CTkLabel(ch_frame, text="📢 Channel / Group", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         self.channel_var = ctk.StringVar()
         self.channel_menu = ctk.CTkOptionMenu(ch_frame, variable=self.channel_var, values=["Login first..."], state="disabled", width=500, command=self.select_channel)
-        self.channel_menu.pack(padx=10, pady=5)
+        self.channel_search = ctk.CTkEntry(ch_frame, placeholder_text="Search channels or groups…")
+        self.channel_search.pack(fill="x", padx=10, pady=5)
+        self.channel_search.bind("<KeyRelease>", self.filter_channels)
+        self.channel_search.bind("<Return>", self.choose_filtered_channel)
+        self.channel_menu.pack(fill="x", padx=10, pady=5)
+        self.channel_hint = ctk.CTkLabel(ch_frame, text="Log in to load channels and groups.")
+        self.channel_hint.pack(anchor="w", padx=10)
+        self.topic_search = ctk.CTkEntry(ch_frame, placeholder_text="Search topics…")
+        self.topic_search.pack(fill="x", padx=10, pady=5)
+        self.topic_search.bind("<KeyRelease>", self.filter_topics)
+        tools = ctk.CTkFrame(ch_frame, fg_color="transparent")
+        tools.pack(fill="x", padx=10)
+        ctk.CTkButton(tools, text="Select visible", command=lambda: self.select_topics(True)).pack(side="left", padx=4)
+        ctk.CTkButton(tools, text="Clear selection", command=lambda: self.select_topics(False)).pack(side="left", padx=4)
+        self.topic_list = ctk.CTkScrollableFrame(ch_frame, height=135)
+        self.topic_list.pack(fill="x", padx=10, pady=5)
+        self.topic_count = ctk.CTkLabel(ch_frame, text="No topics selected")
+        self.topic_count.pack(anchor="w", padx=10)
 
         self.topic_var = ctk.StringVar(value="No topic required")
         self.topic_menu = ctk.CTkOptionMenu(ch_frame, variable=self.topic_var,
             values=["No topic required"], state="disabled", width=500)
-        self.topic_menu.pack(padx=10, pady=5)
+        ctk.CTkLabel(ch_frame, textvariable=self.topic_var).pack(anchor="w", padx=10, pady=5)
 
         # ── File Type ──
         type_frame = ctk.CTkFrame(content)
@@ -75,27 +95,31 @@ class App(ctk.CTk):
         quick_row = ctk.CTkFrame(type_frame, fg_color="transparent")
         quick_row.pack(fill="x", padx=10)
 
-        for label, value in [("All","all"),("Photos","photo"),("Videos","video"),("Audio","audio"),("PDF",".pdf"),("Word",".docx"),("Excel",".xlsx"),("ZIP",".zip"),("Custom","custom")]:
-            ctk.CTkRadioButton(quick_row, text=label, variable=self.media_type, value=value).pack(side="left", padx=5)
+        for index, (label, value) in enumerate([("Photos", "photo"), ("Videos", "video"), ("Audio", "audio"), ("PDF", ".pdf"), ("Word", ".docx"), ("Excel", ".xlsx"), ("ZIP", ".zip"), ("Custom extensions", "custom")]):
+            var = ctk.BooleanVar(value=value in ("photo", "video"))
+            self.media_checks[value] = var
+            ctk.CTkCheckBox(quick_row, text=label, variable=var).grid(row=index//3, column=index%3, sticky="w", padx=5, pady=6)
+        self.all_media = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(type_frame, text="All media (overrides type selections)", variable=self.all_media).pack(anchor="w", padx=15, pady=5)
 
         custom_row = ctk.CTkFrame(type_frame, fg_color="transparent")
         custom_row.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(custom_row, text="Custom:").pack(side="left")
         self.custom_ext = ctk.CTkEntry(custom_row, width=200, placeholder_text=".psd / .dwg / .pdf,.xlsx,.csv")
         self.custom_ext.pack(side="left", padx=8)
-        self.custom_ext.bind("<Key>", lambda e: self.media_type.set("custom"))
+        self.custom_ext.bind("<Key>", lambda e: self.media_checks["custom"].set(True))
 
         # ── Limit ──
         limit_frame = ctk.CTkFrame(content)
         limit_frame.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(limit_frame, text="🔢 How Many Files", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(limit_frame, text="How many new files per topic / channel", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
         self.limit_mode = ctk.StringVar(value="all")
         limit_row = ctk.CTkFrame(limit_frame, fg_color="transparent")
         limit_row.pack(fill="x", padx=10)
 
-        for label, value in [("Last 20","20"),("Last 50","50"),("Last 100","100"),("All","all"),("Custom","custom")]:
-            ctk.CTkRadioButton(limit_row, text=label, variable=self.limit_mode, value=value).pack(side="left", padx=8)
+        for index, (label, value) in enumerate([("Last 20","20"),("Last 50","50"),("Last 100","100"),("All","all"),("Custom","custom")]):
+            ctk.CTkRadioButton(limit_row, text=label, variable=self.limit_mode, value=value).grid(row=index//3, column=index%3, sticky="w", padx=8, pady=5)
 
         custom_limit_row = ctk.CTkFrame(limit_frame, fg_color="transparent")
         custom_limit_row.pack(fill="x", padx=10, pady=5)
@@ -121,11 +145,11 @@ class App(ctk.CTk):
         folder_row = ctk.CTkFrame(folder_frame, fg_color="transparent")
         folder_row.pack(fill="x", padx=10)
         self.folder_path = ctk.StringVar(value=os.path.expanduser("~/Downloads/Telegram"))
-        ctk.CTkEntry(folder_row, textvariable=self.folder_path, width=450).pack(side="left", padx=5)
+        ctk.CTkEntry(folder_row, textvariable=self.folder_path).pack(side="left", padx=5, fill="x", expand=True)
         ctk.CTkButton(folder_row, text="Browse", width=80, command=self.browse).pack(side="left")
 
         # ── Buttons ──
-        btn_row = ctk.CTkFrame(content, fg_color="transparent")
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(pady=8)
         self.start_btn  = ctk.CTkButton(btn_row, text="⬇ Start",  width=130, state="disabled", command=self.start_download)
         self.pause_btn  = ctk.CTkButton(btn_row, text="⏸ Pause",  width=130, state="disabled", command=self.pause)
@@ -134,10 +158,10 @@ class App(ctk.CTk):
             btn.pack(side="left", padx=8)
 
         # ── Progress ──
-        self.progress = ctk.CTkProgressBar(content, width=620)
-        self.progress.pack(padx=15, pady=4)
+        self.progress = ctk.CTkProgressBar(self, width=620)
+        self.progress.pack(fill="x", padx=15, pady=4)
         self.progress.set(0)
-        self.progress_label = ctk.CTkLabel(content, text="Ready")
+        self.progress_label = ctk.CTkLabel(self, text="Ready")
         self.progress_label.pack()
 
         # ── Tabs ──
@@ -170,7 +194,10 @@ class App(ctk.CTk):
     def _load_history_tab(self):
         self.history_box.configure(state="normal")
         self.history_box.delete("1.0", "end")
-        for h in reversed(load_history()):
+        history = load_history()
+        if not history:
+            self.history_box.insert("end", "Completed downloads will appear here.\n")
+        for h in reversed(history):
             self.history_box.insert("end",
                 f"📅 {h['date']}  |  📢 {h['channel']}  |  ✅ {h['files']} files  |  📁 {h['folder']}\n"
             )
@@ -229,7 +256,7 @@ class App(ctk.CTk):
             if names:
                 self.after(0, lambda: self.channel_menu.set(names[0]))
                 self.after(0, self.select_channel)
-            self.after(0, lambda: self.login_btn.configure(state="normal"))
+            self.after(0, self.filter_channels)
             self.log(f"📋 {len(channels)} channels & groups loaded.")
 
         except Exception:
@@ -251,6 +278,49 @@ class App(ctk.CTk):
         else:
             self.log("❌ No OTP entered or login not started.")
 
+    def choose_filtered_channel(self, _event=None):
+        if self.busy:
+            return
+        query = self.channel_search.get().strip().casefold()
+        matches = [c for c in self.channels if query in c.name.casefold() or query in str(c.id)]
+        if matches:
+            c = matches[0]
+            self.channel_var.set(f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]")
+            self.select_channel()
+
+    def filter_channels(self, _event=None):
+        if self.busy:
+            return
+        query = self.channel_search.get().strip().casefold()
+        names = [f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in self.channels
+                 if query in c.name.casefold() or query in str(c.id)]
+        self.channel_menu.configure(values=names or ["No matches"], state="normal" if names else "disabled")
+        self.channel_hint.configure(text=f"{len(names)} matching channels / groups. Selected: {self.channel_var.get() or 'none'}")
+
+    def filter_topics(self, _event=None):
+        query = self.topic_search.get().strip().casefold()
+        for label, (_var, check) in self.topic_checks.items():
+            check.pack_forget()
+            if query in label.casefold():
+                check.pack(anchor="w", fill="x", padx=6, pady=4)
+        self.update_topic_count()
+
+    def update_topic_count(self):
+        count = sum(var.get() for var, _check in self.topic_checks.values())
+        visible = sum(self.topic_search.get().strip().casefold() in label.casefold() for label in self.topic_checks)
+        self.topic_count.configure(text=f"{count} selected · {visible} matching topics (search preserves selections)")
+        self.start_btn.configure(state="normal" if not self.busy and (count or not getattr(self.selected_channel().entity, "forum", False)) else "disabled")
+
+    def select_topics(self, selected):
+        if self.busy:
+            return
+        query = self.topic_search.get().strip().casefold()
+        for label, (var, _check) in self.topic_checks.items():
+            if not selected or query in label.casefold():
+                var.set(selected)
+        if self.channels:
+            self.update_topic_count()
+
     def selected_channel(self):
         return next(c for c in self.channels
             if f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" == self.channel_var.get())
@@ -259,7 +329,13 @@ class App(ctk.CTk):
         self.topic_generation += 1
         generation = self.topic_generation
         self.topics = {}
+        for _var, check in self.topic_checks.values():
+            check.destroy()
+        self.topic_checks = {}
+        self.topic_search.delete(0, "end")
+        self.topic_count.configure(text="No topics selected")
         selected = self.selected_channel()
+        self.channel_hint.configure(text=f"Selected: {selected.name}")
         self.start_btn.configure(state="disabled")
         self.topic_menu.configure(state="disabled")
         if not getattr(selected.entity, "forum", False):
@@ -282,40 +358,65 @@ class App(ctk.CTk):
                 self.log("❌ Could not load topics. Reselect the group to retry.")
                 return
             self.topic_menu.configure(values=list(self.topics), state="normal")
-            self.topic_var.set(next(iter(self.topics)))
-            self.start_btn.configure(state="normal")
+            self.topic_var.set("Choose one or more topics below.")
+            for label in self.topics:
+                var = ctk.BooleanVar(value=False)
+                check = ctk.CTkCheckBox(self.topic_list, text=label, variable=var, command=self.update_topic_count)
+                check.pack(anchor="w", fill="x", padx=6, pady=4)
+                self.topic_checks[label] = (var, check)
+            self.start_btn.configure(state="disabled")
         asyncio.run_coroutine_threadsafe(load(), self.loop)
 
     def start_download(self):
         if self.busy:
             return
         selected = self.selected_channel()
-        topic_id = self.topics.get(self.topic_var.get())
+        topic_labels = dict(self.topics)
+        topic_ids = [self.topics[label] for label, (var, _check) in self.topic_checks.items() if var.get()]
+        topic_id = topic_ids[0] if topic_ids else None
         if getattr(selected.entity, "forum", False) and topic_id is None:
             self.log("Select a topic first.")
             return
 
-        selected_type = self.media_type.get()
-        if selected_type == "custom":
-            selected_type = self.custom_ext.get().strip().lower() or None
-
+        tokens = [token for token, var in self.media_checks.items() if var.get() and token != "custom"]
+        if self.media_checks["custom"].get():
+            import re
+            extensions = [e.strip().lower() for e in self.custom_ext.get().split(",")]
+            if not all(re.fullmatch(r"\.[a-z0-9]{1,10}", e) for e in extensions):
+                self.log("Enter extensions such as .pdf,.csv for the custom filter.")
+                return
+            tokens.extend(extensions)
+        selected_type = "all" if self.all_media.get() else ",".join(sorted(set(tokens)))
+        if not selected_type:
+            self.log("Select at least one media type or All media.")
+            return
         limit_mode = self.limit_mode.get()
-        custom_limit = int(self.custom_limit.get()) if limit_mode == "custom" and self.custom_limit.get().isdigit() else 20
+        raw_limit = self.custom_limit.get().strip()
+        if limit_mode == "custom" and (not raw_limit.isdecimal() or int(raw_limit) < 1):
+            self.log("Enter a positive number of files per topic.")
+            return
+        custom_limit = int(raw_limit) if limit_mode == "custom" else 20
+        if not self.folder_path.get().strip():
+            self.log("Choose a destination folder.")
+            return
 
         folder = group_folder(self.folder_path.get(), selected.name, selected.id)
 
-        history_name = selected.name
-        if topic_id is not None:
-            folder = os.path.join(folder, f"topic_{topic_id}")
-            history_name += f" / {self.topic_var.get()}"
+        base_folder = folder
         self.log("Starting download for the selected channel/topic...")
         self.busy = True
         # Reset before scheduling so an immediate Cancel cannot be overwritten.
         self.downloader.paused = False
         self.downloader.cancelled = False
         self.channel_menu.configure(state="disabled")
-        self.topic_menu.configure(state="disabled")
+        self.channel_search.configure(state="disabled")
+        self.topic_search.configure(state="disabled")
+        for _var, check in self.topic_checks.values():
+            check.configure(state="disabled")
         reverse = self.reverse.get()
+        if limit_mode == "all":
+            self.progress.configure(mode="indeterminate")
+            self.progress.start()
         self.after(0, lambda: self.progress.set(0))
         self.after(0, lambda: self.progress_label.configure(text="Starting..."))
         self.after(0, lambda: self.start_btn.configure(state="disabled"))
@@ -328,23 +429,27 @@ class App(ctk.CTk):
             ))
             self.after(0, lambda: self.progress.set(min(fraction, 1.0)))
 
-        def on_done(count, skipped):
-            save_history(history_name, folder, count)
-            self.after(0, self._load_history_tab)
-            self.log(f"Download finished: {count} downloaded, {skipped} skipped.")
-            self.log(f"📁 Saved to: {os.path.abspath(folder)}")
-            self.after(0, lambda: self.start_btn.configure(state="disabled"))
-            self.after(0, lambda: self.pause_btn.configure(state="disabled"))
-            self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
-
         async def run_download():
             try:
-                status = await self.downloader.download(
-                    selected, folder, selected_type,
-                    limit_mode, custom_limit,
-                    reverse,
-                    on_progress, self.log, on_done, topic_id=topic_id, reset_controls=False
-                )
+                status = "complete"
+                for index, current_topic in enumerate(topic_ids or [None]):
+                    if self.downloader.cancelled:
+                        status = "cancelled"
+                        break
+                    folder = os.path.join(base_folder, f"topic_{current_topic}") if current_topic is not None else base_folder
+                    name = next((label for label, tid in topic_labels.items() if tid == current_topic), "")
+                    self.log(f"Scope {index + 1}/{len(topic_ids) or 1}: {name or selected.name}")
+                    def done(count, skipped, destination=folder, title=name):
+                        save_history(selected.name + (f" / {title}" if title else ""), destination, count)
+                        self.after(0, self._load_history_tab)
+                        self.log(f"Scope finished: {count} downloaded, {skipped} skipped.")
+                    result = await self.downloader.download(
+                        selected, folder, selected_type, limit_mode, custom_limit,
+                        reverse, on_progress, self.log, done, topic_id=current_topic, reset_controls=False)
+                    if result != "complete":
+                        status = result
+                        if result == "cancelled":
+                            break
                 if status == "complete":
                     self.after(0, lambda: self.progress.set(1))
                 self.after(0, lambda: self.progress_label.configure(text=f"Download {status}"))
@@ -355,8 +460,13 @@ class App(ctk.CTk):
                 self.after(0, finish)
         def finish():
             self.busy = False
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
             self.channel_menu.configure(state="normal")
-            self.topic_menu.configure(state="normal" if self.topics else "disabled")
+            self.channel_search.configure(state="normal")
+            self.topic_search.configure(state="normal")
+            for _var, check in self.topic_checks.values():
+                check.configure(state="normal")
             self.start_btn.configure(state="normal")
             self.pause_btn.configure(state="disabled", text="⏸ Pause")
             self.cancel_btn.configure(state="disabled")
@@ -366,6 +476,7 @@ class App(ctk.CTk):
         self.downloader.paused = not self.downloader.paused
         label = "▶ Resume" if self.downloader.paused else "⏸ Pause"
         self.after(0, lambda: self.pause_btn.configure(text=label))
+        self.progress_label.configure(text="Paused" if self.downloader.paused else "Downloading…")
         self.log("⏸ Paused." if self.downloader.paused else "▶ Resumed.")
 
     def cancel(self):
