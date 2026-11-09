@@ -78,6 +78,30 @@ class DownloadsTest(unittest.IsolatedAsyncioTestCase):
     def checkpoint(self, tid=7, media_filter='all', folder=None):
         return d.load_last_id(self.channel.id, tid, media_filter, folder or self.folder)
 
+    async def test_named_topic_requests_thread_before_downloading(self):
+        target, unrelated = message(20, 7), message(30, 8)
+        async def iterate(entity, **kwargs):
+            self.assertIs(entity, self.channel.entity)
+            self.assertEqual(kwargs.get('reply_to'), 7)
+            # A defensive client filter must still reject unrelated results.
+            yield unrelated
+            yield target
+        self.downloader.client.iter_messages = iterate
+        with patch.object(d.asyncio, 'sleep', new=AsyncMock()):
+            self.assertEqual(await self.run_download(), 'complete')
+        target.download_media.assert_awaited_once()
+        unrelated.download_media.assert_not_awaited()
+        self.assertEqual(self.done, [(1, 0)])
+
+    async def test_general_and_regular_channels_do_not_request_reply_thread(self):
+        for forum, tid in [(True, 1), (False, None)]:
+            self.channel.entity.forum = forum
+            self.messages = [message(10)]
+            with patch.object(d.asyncio, 'sleep', new=AsyncMock()):
+                await self.run_download(topic_id=tid, mode='1')
+            self.assertNotIn('reply_to', self.requests[-1][1])
+            self.assertIs(self.requests[-1][0], self.channel.entity)
+
     async def test_topic_isolation_both_orders_and_incremental_rerun(self):
         for reverse in (False, True):
             with self.subTest(reverse=reverse), patch.object(d.asyncio, 'sleep', new=AsyncMock()):

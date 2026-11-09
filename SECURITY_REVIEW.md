@@ -81,8 +81,8 @@ forum topics, ordinary channels, limits and media filters, pause/cancel/rerun in
 both orders, and the visible layout. Check that error/cancel status stays accurate
 and no sensitive content appears in logs. Never attach credentials or sessions.
 
-The downloader scans group history to identify topic membership; large groups
-can take time. Controls act between API requests and do not abort an in-flight
+Named topics now request their reply thread directly; General retains group
+history with local filtering. Controls act between API requests and do not abort an in-flight
 network request. Closed/hidden topics returned by Telegram remain selectable;
 deleted/missing topics fail closed. No password/2FA prompt was added: accounts
 requiring additional authentication receive a generic login failure.
@@ -96,3 +96,22 @@ sharing state are outside this change's guarantees. Use one instance per state
 location. No claim of complete vulnerability absence is made.
 
 All changes remain on a feature branch. No merge is authorized by this review.
+
+
+## Download-start follow-up (2026-11-08)
+
+The prior implementation scanned the entire group before finding a selected
+named topic. It now requests that topic through Telethon's `reply_to` argument,
+uses the discovered entity directly, and retains defensive local filtering.
+General and ordinary channels continue using unthreaded history. A fixed,
+non-resizable 960-pixel window also made lower controls inaccessible on smaller
+screens; the form is now scrollable in a screen-height-aware, resizable window.
+An immediate start log distinguishes a button click from later network work.
+These are code-level defects; the user's specific live failure is not reproduced
+with their account and remains subject to the GUI retest.
+
+40 mock-based tests pass with the installed Telethon 1.45.0. Added coverage checks
+thread request routing, General/ordinary history routing, selected-topic download
+start, duplicate-click suppression, successful completion and control recovery.
+No live account credentials or session were used. See MANUAL_RETEST.md for the
+GUI-only retest sequence. No merge was performed.

@@ -13,8 +13,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Telegram Media Downloader")
-        self.geometry("680x960")
-        self.resizable(False, False)
+        self.geometry(f"780x{min(900, self.winfo_screenheight() - 100)}")
+        self.resizable(True, True)
         self.downloader = None
         self.loop = None
         self.channels = []
@@ -24,8 +24,10 @@ class App(ctk.CTk):
         self._build()
 
     def _build(self):
+        content = ctk.CTkScrollableFrame(self)
+        content.pack(fill="both", expand=True)
         # ── Credentials ──
-        cred = ctk.CTkFrame(self)
+        cred = ctk.CTkFrame(content)
         cred.pack(fill="x", padx=15, pady=8)
         ctk.CTkLabel(cred, text="🔑 Credentials", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
@@ -52,7 +54,7 @@ class App(ctk.CTk):
         self.login_btn.pack(side="left", padx=10)
 
         # ── Channel ──
-        ch_frame = ctk.CTkFrame(self)
+        ch_frame = ctk.CTkFrame(content)
         ch_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(ch_frame, text="📢 Channel / Group", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         self.channel_var = ctk.StringVar()
@@ -65,7 +67,7 @@ class App(ctk.CTk):
         self.topic_menu.pack(padx=10, pady=5)
 
         # ── File Type ──
-        type_frame = ctk.CTkFrame(self)
+        type_frame = ctk.CTkFrame(content)
         type_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(type_frame, text="🗂 File Type Filter", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
@@ -84,7 +86,7 @@ class App(ctk.CTk):
         self.custom_ext.bind("<Key>", lambda e: self.media_type.set("custom"))
 
         # ── Limit ──
-        limit_frame = ctk.CTkFrame(self)
+        limit_frame = ctk.CTkFrame(content)
         limit_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(limit_frame, text="🔢 How Many Files", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
@@ -103,7 +105,7 @@ class App(ctk.CTk):
         self.custom_limit.bind("<Key>", lambda e: self.limit_mode.set("custom"))
 
         # ── Download Order ──
-        dir_frame = ctk.CTkFrame(self)
+        dir_frame = ctk.CTkFrame(content)
         dir_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(dir_frame, text="📅 Download Order", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         dir_row = ctk.CTkFrame(dir_frame, fg_color="transparent")
@@ -113,7 +115,7 @@ class App(ctk.CTk):
         ctk.CTkRadioButton(dir_row, text="Oldest → Newest", variable=self.reverse, value=True).pack(side="left", padx=10)
 
         # ── Folder ──
-        folder_frame = ctk.CTkFrame(self)
+        folder_frame = ctk.CTkFrame(content)
         folder_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(folder_frame, text="📁 Save To", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         folder_row = ctk.CTkFrame(folder_frame, fg_color="transparent")
@@ -123,7 +125,7 @@ class App(ctk.CTk):
         ctk.CTkButton(folder_row, text="Browse", width=80, command=self.browse).pack(side="left")
 
         # ── Buttons ──
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row = ctk.CTkFrame(content, fg_color="transparent")
         btn_row.pack(pady=8)
         self.start_btn  = ctk.CTkButton(btn_row, text="⬇ Start",  width=130, state="disabled", command=self.start_download)
         self.pause_btn  = ctk.CTkButton(btn_row, text="⏸ Pause",  width=130, state="disabled", command=self.pause)
@@ -132,14 +134,14 @@ class App(ctk.CTk):
             btn.pack(side="left", padx=8)
 
         # ── Progress ──
-        self.progress = ctk.CTkProgressBar(self, width=620)
+        self.progress = ctk.CTkProgressBar(content, width=620)
         self.progress.pack(padx=15, pady=4)
         self.progress.set(0)
-        self.progress_label = ctk.CTkLabel(self, text="Ready")
+        self.progress_label = ctk.CTkLabel(content, text="Ready")
         self.progress_label.pack()
 
         # ── Tabs ──
-        tab = ctk.CTkTabview(self)
+        tab = ctk.CTkTabview(content)
         tab.pack(fill="both", expand=True, padx=15, pady=5)
         tab.add("📋 Log")
         tab.add("🕘 History")
@@ -306,6 +308,7 @@ class App(ctk.CTk):
         if topic_id is not None:
             folder = os.path.join(folder, f"topic_{topic_id}")
             history_name += f" / {self.topic_var.get()}"
+        self.log("Starting download for the selected channel/topic...")
         self.busy = True
         # Reset before scheduling so an immediate Cancel cannot be overwritten.
         self.downloader.paused = False

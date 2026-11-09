@@ -114,6 +114,33 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app.progress_label.options['text'],'Download failed')
         self.assertNotIn('SYNTHETIC_SECRET','\n'.join(self.app.logs))
 
+    async def test_start_submits_selected_topic_and_recovers_for_next_download(self):
+        for name, value in [('media_type','all'), ('limit_mode','custom'),
+                            ('custom_limit','1'), ('folder_path','/synthetic-destination'),
+                            ('reverse',False)]:
+            setattr(self.app, name, Widget(value))
+        self.app.topics = {'Files [7]': 7, 'Other [8]': 8}
+        self.app.topic_var.set('Files [7]')
+        self.app._load_history_tab = lambda: None
+        async def download(*args, **kwargs):
+            args[6](1, 0, 1.0)
+            args[8](1, 0)
+            return 'complete'
+        self.app.downloader.download = AsyncMock(side_effect=download)
+        with patch('app.save_history') as history:
+            App.start_download(self.app)
+            App.start_download(self.app)  # Duplicate clicks cannot start another job.
+            await asyncio.gather(*self.tasks)
+        call = self.app.downloader.download.call_args
+        self.app.downloader.download.assert_awaited_once()
+        self.assertEqual(call.kwargs, {'topic_id':7, 'reset_controls':False})
+        self.assertTrue(call.args[1].endswith('/topic_7'))
+        self.assertEqual(call.args[2:6], ('all','custom',1,False))
+        history.assert_called_once()
+        self.assertFalse(self.app.busy)
+        self.assertEqual(self.app.progress_label.options['text'], 'Download complete')
+        self.assertEqual(self.app.start_btn.options['state'], 'normal')
+
     async def test_login_error_does_not_log_exception(self):
         self.app.downloader.client = NS(connect=AsyncMock(side_effect=RuntimeError('SYNTHETIC_SECRET_MUST_NOT_APPEAR')))
         await App._async_login(self.app)

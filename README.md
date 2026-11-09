@@ -78,8 +78,8 @@ Ordinary channels and groups keep their existing behavior.
 
 Topic matching uses Telegram's `forum_topic`, `reply_to_top_id`, and
 `reply_to_msg_id` fields. General (ID 1) includes messages without a forum reply
-header. The app scans group history and filters before applying media type and
-file limits; large forums may take longer to scan. It never falls back to a
+header. Named topics are fetched directly through their reply thread; General uses
+group history. Local topic filtering runs before media type and file limits. It never falls back to a
 whole-group download when topic loading fails.
 
 Topic sync checkpoints are independent of whole-group checkpoints and of other

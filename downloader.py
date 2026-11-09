@@ -201,12 +201,15 @@ class TelegramDownloader:
         direction = "Oldest → Newest" if reverse else "Newest → Oldest"
         on_log(f"📅 Order: {direction}")
 
+        # General uses ordinary history; other forum topics are reply threads.
+        scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
         async for message in self.client.iter_messages(
-            channel.id,
+            channel.entity,
             limit=None,
             wait_time=0,
             reverse=reverse,
-            min_id=last_id
+            min_id=last_id,
+            **scope
         ):
             while self.paused and not self.cancelled:
                 await asyncio.sleep(0.5)
