@@ -67,3 +67,27 @@ This tool uses the official Telegram API and only works with channels and groups
 ## License
 
 MIT License
+
+
+## Forum topics
+
+For forum-enabled supergroups, choose a topic after selecting the group. Topic
+names include their IDs so duplicate titles remain distinguishable. Downloads
+are saved under `topic_<id>` inside the group folder and history records the topic.
+Ordinary channels and groups keep their existing behavior.
+
+Topic matching uses Telegram's `forum_topic`, `reply_to_top_id`, and
+`reply_to_msg_id` fields. General (ID 1) includes messages without a forum reply
+header. The app scans group history and filters before applying media type and
+file limits; large forums may take longer to scan. It never falls back to a
+whole-group download when topic loading fails.
+
+Topic sync checkpoints are independent of whole-group checkpoints and of other
+topics and media filters. Only a completed All scan advances the checkpoint;
+cancelled or failed scans can be retried without skipping unfinished files.
+
+Run automated tests with `python -m unittest discover -s tests -v`.
+For a live check, select a forum with General and two named topics, download each,
+verify the separate folders contain only the selected topic's media, then cancel
+and rerun All in both orders. Also verify an ordinary channel, and switch groups
+while topics are loading. Live checks require your own Telegram login.
