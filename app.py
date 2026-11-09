@@ -3,7 +3,7 @@ from tkinter import filedialog
 import asyncio
 import threading
 import os
-from downloader import TelegramDownloader
+from downloader import TelegramDownloader, group_folder
 from history import load_history, save_history
 
 ctk.set_appearance_mode("dark")
@@ -30,21 +30,21 @@ class App(ctk.CTk):
         ctk.CTkLabel(cred, text="🔑 Credentials", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
         for label, attr, placeholder in [
-            ("API ID",   "api_id",   "123456"),
+            ("API ID",   "api_id",   "Your API ID"),
             ("API Hash", "api_hash", "abcdef..."),
-            ("Phone",    "phone",    "+1234567890"),
+            ("Phone",    "phone",    "Phone with country code"),
         ]:
             row = ctk.CTkFrame(cred, fg_color="transparent")
             row.pack(fill="x", padx=10, pady=2)
             ctk.CTkLabel(row, text=label, width=80).pack(side="left")
-            entry = ctk.CTkEntry(row, width=350, placeholder_text=placeholder)
+            entry = ctk.CTkEntry(row, width=350, placeholder_text=placeholder, show="*" if attr in ("api_hash", "phone") else "")
             entry.pack(side="left", padx=5)
             setattr(self, attr, entry)
 
         login_row = ctk.CTkFrame(cred, fg_color="transparent")
         login_row.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(login_row, text="OTP Code", width=80).pack(side="left")
-        self.otp = ctk.CTkEntry(login_row, width=150, placeholder_text="Check Telegram app")
+        self.otp = ctk.CTkEntry(login_row, width=150, placeholder_text="Check Telegram app", show="*")
         self.otp.pack(side="left", padx=5)
         self.otp_btn = ctk.CTkButton(login_row, text="Submit OTP", width=110, state="disabled", command=self.submit_otp)
         self.otp_btn.pack(side="left", padx=5)
@@ -183,8 +183,20 @@ class App(ctk.CTk):
             self.log("❌ Please fill in API ID, API Hash and Phone first.")
             return
 
+        if self.downloader is not None:
+            self.log("Restart the app to retry login or switch accounts.")
+            return
+        if not api_id.isdecimal() or int(api_id) <= 0:
+            self.log("Enter a valid numeric API ID.")
+            return
         self.loop = asyncio.new_event_loop()
-        self.downloader = TelegramDownloader(int(api_id), api_hash, phone)
+        try:
+            self.downloader = TelegramDownloader(int(api_id), api_hash, phone)
+        except Exception:
+            self.log("Could not initialize Telegram. Check local session permissions.")
+            self.loop.close()
+            self.loop = None
+            return
         self.after(0, lambda: self.login_btn.configure(state="disabled"))
         self.log("🔄 Connecting to Telegram...")
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
@@ -196,13 +208,16 @@ class App(ctk.CTk):
             if not await self.downloader.client.is_user_authorized():
                 await self.downloader.client.send_code_request(self.downloader.phone)
                 self.log("📱 OTP sent to your Telegram app! Enter it and click Submit OTP.")
-                self.after(0, lambda: self.otp_btn.configure(state="normal"))
                 self.downloader.otp_future = self.loop.create_future()
+                self.after(0, lambda: self.otp_btn.configure(state="normal"))
                 code = await self.downloader.otp_future
                 await self.downloader.client.sign_in(self.downloader.phone, code)
 
             self.log("✅ Logged in successfully!")
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
+            self.after(0, lambda: self.api_hash.delete(0, "end"))
+            self.after(0, lambda: self.phone.delete(0, "end"))
+            self.after(0, lambda: self.api_id.delete(0, "end"))
 
             channels = await self.downloader.get_channels()
             self.channels = channels
@@ -215,14 +230,20 @@ class App(ctk.CTk):
             self.after(0, lambda: self.login_btn.configure(state="normal"))
             self.log(f"📋 {len(channels)} channels & groups loaded.")
 
-        except Exception as e:
-            self.log(f"❌ Login error: {e}")
+        except Exception:
+            self.log("❌ Login failed. Check credentials and account authentication settings.")
             self.after(0, lambda: self.login_btn.configure(state="normal"))
+        finally:
+            self.downloader.otp_future = None
+            self.after(0, lambda: self.otp.delete(0, "end"))
+            self.after(0, lambda: self.otp_btn.configure(state="disabled"))
 
     def submit_otp(self):
         code = self.otp.get().strip()
         if code and self.downloader and self.downloader.otp_future:
-            self.loop.call_soon_threadsafe(self.downloader.otp_future.set_result, code)
+            self.otp.delete(0, "end")
+            future = self.downloader.otp_future
+            self.loop.call_soon_threadsafe(lambda: None if future.done() else future.set_result(code))
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
             self.log("✅ OTP submitted.")
         else:
@@ -248,15 +269,15 @@ class App(ctk.CTk):
             try:
                 topics = await self.downloader.get_topics(selected)
                 self.after(0, apply_topics, topics, None)
-            except Exception as error:
-                self.after(0, apply_topics, [], str(error))
+            except Exception:
+                self.after(0, apply_topics, [], True)
         def apply_topics(topics, error):
             if generation != self.topic_generation:
                 return
             self.topics = {f"{t.title} [{t.id}]": t.id for t in topics}
             if error or not topics:
                 self.topic_var.set("Topics unavailable — reselect group to retry")
-                self.log(f"❌ Could not load topics: {error or 'No topics returned'}")
+                self.log("❌ Could not load topics. Reselect the group to retry.")
                 return
             self.topic_menu.configure(values=list(self.topics), state="normal")
             self.topic_var.set(next(iter(self.topics)))
@@ -279,13 +300,16 @@ class App(ctk.CTk):
         limit_mode = self.limit_mode.get()
         custom_limit = int(self.custom_limit.get()) if limit_mode == "custom" and self.custom_limit.get().isdigit() else 20
 
-        folder = os.path.join(self.folder_path.get(), selected.name.replace("/", "_"))
+        folder = group_folder(self.folder_path.get(), selected.name, selected.id)
 
         history_name = selected.name
         if topic_id is not None:
             folder = os.path.join(folder, f"topic_{topic_id}")
             history_name += f" / {self.topic_var.get()}"
         self.busy = True
+        # Reset before scheduling so an immediate Cancel cannot be overwritten.
+        self.downloader.paused = False
+        self.downloader.cancelled = False
         self.channel_menu.configure(state="disabled")
         self.topic_menu.configure(state="disabled")
         reverse = self.reverse.get()
@@ -304,24 +328,26 @@ class App(ctk.CTk):
         def on_done(count, skipped):
             save_history(history_name, folder, count)
             self.after(0, self._load_history_tab)
-            self.log(f"\n🎉 Done! {count} downloaded, {skipped} skipped.")
+            self.log(f"Download finished: {count} downloaded, {skipped} skipped.")
             self.log(f"📁 Saved to: {os.path.abspath(folder)}")
-            self.after(0, lambda: self.progress.set(1))
-            self.after(0, lambda: self.progress_label.configure(text=f"✅ Complete — {count} files"))
             self.after(0, lambda: self.start_btn.configure(state="disabled"))
             self.after(0, lambda: self.pause_btn.configure(state="disabled"))
             self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
 
         async def run_download():
             try:
-                await self.downloader.download(
+                status = await self.downloader.download(
                     selected, folder, selected_type,
                     limit_mode, custom_limit,
                     reverse,
-                    on_progress, self.log, on_done, topic_id=topic_id
+                    on_progress, self.log, on_done, topic_id=topic_id, reset_controls=False
                 )
-            except Exception as error:
-                self.log(f"❌ Download error: {error}")
+                if status == "complete":
+                    self.after(0, lambda: self.progress.set(1))
+                self.after(0, lambda: self.progress_label.configure(text=f"Download {status}"))
+            except Exception:
+                self.log("❌ Download failed. Check connection and local file permissions.")
+                self.after(0, lambda: self.progress_label.configure(text="Download failed"))
             finally:
                 self.after(0, finish)
         def finish():
