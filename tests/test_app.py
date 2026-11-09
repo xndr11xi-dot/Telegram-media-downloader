@@ -18,6 +18,16 @@ class Widget:
         self.value = value
     def configure(self,**options):
         self.options.update(options)
+    def pack(self, **kwargs):
+        self.options["visible"] = True
+    def pack_forget(self):
+        self.options["visible"] = False
+    def destroy(self):
+        pass
+    def start(self):
+        pass
+    def stop(self):
+        pass
     def delete(self,*args):
         self.value = ''
 
@@ -32,6 +42,13 @@ def fake_app():
     app.log = app.logs.append
     app.selected_channel = lambda:App.selected_channel(app)
     app.downloader = NS(get_topics=AsyncMock(),paused=False,cancelled=False)
+    app.topic_checks = {}
+    app.media_checks = {"photo": Widget(False), "video": Widget(False), "custom": Widget(False)}
+    app.all_media = Widget(True)
+    for name in ['topic_search', 'channel_search', 'topic_count', 'channel_hint', 'topic_list']:
+        setattr(app, name, Widget())
+    app.filter_channels = lambda: App.filter_channels(app)
+    app.update_topic_count = lambda: App.update_topic_count(app)
     app.loop = None
     return app
 
@@ -43,6 +60,10 @@ def channel(cid,forum=True):
 class AppTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.app = fake_app()
+        for name, factory in [('BooleanVar', lambda **kw: Widget(kw.get('value'))), ('CTkCheckBox', lambda *a, **kw: Widget())]:
+            mocked = patch('app.ctk.' + name, side_effect=factory)
+            mocked.start()
+            self.addCleanup(mocked.stop)
         self.tasks = []
         def schedule(coroutine,loop):
             task = asyncio.create_task(coroutine)
@@ -56,15 +77,17 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_topic_selector_duplicate_titles_and_ids(self):
         self.app.downloader.get_topics.return_value = [NS(id=7,title='Files'),NS(id=8,title='Files')]
-        App.select_channel(self.app)
+        with patch('app.ctk.BooleanVar', side_effect=lambda **kw:Widget(kw.get('value'))), patch('app.ctk.CTkCheckBox', side_effect=lambda *a, **kw:Widget()):
+            App.select_channel(self.app)
         self.assertEqual(self.app.start_btn.options['state'],'disabled')
         await asyncio.gather(*self.tasks)
         self.assertEqual(self.app.topics,{'Files [7]':7,'Files [8]':8})
-        self.assertEqual(self.app.start_btn.options['state'],'normal')
+        self.assertEqual(self.app.start_btn.options['state'],'disabled')
 
     async def test_topic_failure_never_enables_bulk_download_or_logs_exception(self):
         self.app.downloader.get_topics.side_effect = RuntimeError('SYNTHETIC_SECRET_MUST_NOT_APPEAR')
-        App.select_channel(self.app)
+        with patch('app.ctk.BooleanVar', side_effect=lambda **kw:Widget(kw.get('value'))), patch('app.ctk.CTkCheckBox', side_effect=lambda *a, **kw:Widget()):
+            App.select_channel(self.app)
         await asyncio.gather(*self.tasks)
         self.assertEqual(self.app.start_btn.options['state'],'disabled')
         self.assertEqual(self.app.topics,{})
@@ -76,11 +99,13 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
             await gate.wait()
             return [NS(id=7,title='Old topic')]
         self.app.downloader.get_topics.side_effect = topics
-        App.select_channel(self.app)
+        with patch('app.ctk.BooleanVar', side_effect=lambda **kw:Widget(kw.get('value'))), patch('app.ctk.CTkCheckBox', side_effect=lambda *a, **kw:Widget()):
+            App.select_channel(self.app)
         await asyncio.sleep(0)
         self.app.channels.append(channel(-10043,False))
         self.app.channel_var.set('📢 Synthetic group [-10043]')
-        App.select_channel(self.app)
+        with patch('app.ctk.BooleanVar', side_effect=lambda **kw:Widget(kw.get('value'))), patch('app.ctk.CTkCheckBox', side_effect=lambda *a, **kw:Widget()):
+            App.select_channel(self.app)
         gate.set()
         await asyncio.gather(*self.tasks)
         self.assertEqual(self.app.topics,{})
@@ -105,6 +130,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
             setattr(self.app,name,Widget(value))
         self.app.topics = {'Files [7]':7}
         self.app.topic_var.set('Files [7]')
+        self.app.topic_checks = {'Files [7]': (Widget(True), Widget())}
         self.app.downloader.download = AsyncMock(side_effect=RuntimeError('SYNTHETIC_SECRET_MUST_NOT_APPEAR'))
         App.start_download(self.app)
         self.assertTrue(self.app.busy)
@@ -121,6 +147,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
             setattr(self.app, name, Widget(value))
         self.app.topics = {'Files [7]': 7, 'Other [8]': 8}
         self.app.topic_var.set('Files [7]')
+        self.app.topic_checks = {'Files [7]': (Widget(True), Widget())}
         self.app._load_history_tab = lambda: None
         async def download(*args, **kwargs):
             args[6](1, 0, 1.0)

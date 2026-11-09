@@ -134,6 +134,9 @@ class TelegramDownloader:
         return sorted(topics.values(), key=lambda t: (t.id != 1, t.title.casefold(), t.id))
 
     def matches_filter(self, message, media_filter):
+        if media_filter and "," in media_filter:
+            return any(self.matches_filter(message, token.strip()) for token in media_filter.split(",") if token.strip())
+
         if not media_filter or media_filter == "all":
             return message.media is not None
 
