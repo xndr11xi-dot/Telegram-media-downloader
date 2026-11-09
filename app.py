@@ -13,9 +13,9 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Telegram Media Downloader")
-        self.geometry(f"780x{min(900, self.winfo_screenheight() - 100)}")
+        self.geometry(f"{min(1180, self.winfo_screenwidth() - 80)}x{min(900, self.winfo_screenheight() - 80)}")
         self.resizable(True, True)
-        self.minsize(620, 540)
+        self.minsize(700, min(700, self.winfo_screenheight() - 80))
         self.topic_checks = {}
         self.media_checks = {}
         self.downloader = None
@@ -27,155 +27,231 @@ class App(ctk.CTk):
         self._build()
 
     def _build(self):
-        content = ctk.CTkScrollableFrame(self)
-        content.pack(fill="both", expand=True)
-        # ── Credentials ──
-        cred = ctk.CTkFrame(content)
-        cred.pack(fill="x", padx=15, pady=8)
-        ctk.CTkLabel(cred, text="🔑 Credentials", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        for label, attr, placeholder in [
-            ("API ID",   "api_id",   "Your API ID"),
-            ("API Hash", "api_hash", "abcdef..."),
-            ("Phone",    "phone",    "Phone with country code"),
-        ]:
-            row = ctk.CTkFrame(cred, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=2)
-            ctk.CTkLabel(row, text=label, width=80).pack(side="left")
-            entry = ctk.CTkEntry(row, width=350, placeholder_text=placeholder, show="*" if attr in ("api_hash", "phone") else "")
-            entry.pack(side="left", padx=5, fill="x", expand=True)
+        # Collapsible account area leaves the workspace available after login.
+        account = ctk.CTkFrame(self)
+        account.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 6))
+        account.grid_columnconfigure(0, weight=1)
+        heading = ctk.CTkFrame(account, fg_color="transparent")
+        heading.grid(row=0, column=0, sticky="ew", padx=12, pady=6)
+        ctk.CTkLabel(heading, text="Telegram Media Downloader", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        self.account_toggle = ctk.CTkButton(heading, text="Hide login", width=100, command=self.toggle_account)
+        self.account_toggle.pack(side="right")
+        self.account_fields = ctk.CTkFrame(account, fg_color="transparent")
+        self.account_fields.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        for column, (label, attr, placeholder) in enumerate([
+            ("API ID", "api_id", "Your API ID"),
+            ("API hash", "api_hash", "Your API hash"),
+            ("Phone", "phone", "Include country code"),
+        ]):
+            self.account_fields.grid_columnconfigure(column, weight=1, uniform="account")
+            field = ctk.CTkFrame(self.account_fields, fg_color="transparent")
+            field.grid(row=0, column=column, sticky="ew", padx=4)
+            ctk.CTkLabel(field, text=label).pack(anchor="w")
+            entry = ctk.CTkEntry(field, width=120, placeholder_text=placeholder,
+                                 show="*" if attr in ("api_hash", "phone") else "")
+            entry.pack(fill="x")
             setattr(self, attr, entry)
+        login_row = ctk.CTkFrame(self.account_fields, fg_color="transparent")
+        login_row.grid(row=1, column=0, columnspan=3, sticky="ew", padx=4, pady=(8, 0))
+        login_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(login_row, text="Telegram code").grid(row=0, column=0, padx=(0, 8))
+        self.otp = ctk.CTkEntry(login_row, placeholder_text="Check Telegram app", show="*")
+        self.otp.grid(row=0, column=1, sticky="ew")
+        self.otp_btn = ctk.CTkButton(login_row, text="Submit code", width=110, state="disabled", command=self.submit_otp)
+        self.otp_btn.grid(row=0, column=2, padx=8)
+        self.login_btn = ctk.CTkButton(login_row, text="Log in", width=100, command=self.login)
+        self.login_btn.grid(row=0, column=3)
+        self._account_visible = True
 
-        login_row = ctk.CTkFrame(cred, fg_color="transparent")
-        login_row.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(login_row, text="OTP Code", width=80).pack(side="left")
-        self.otp = ctk.CTkEntry(login_row, width=150, placeholder_text="Check Telegram app", show="*")
-        self.otp.pack(side="left", padx=5)
-        self.otp_btn = ctk.CTkButton(login_row, text="Submit OTP", width=110, state="disabled", command=self.submit_otp)
-        self.otp_btn.pack(side="left", padx=5)
-        self.login_btn = ctk.CTkButton(login_row, text="🔐 Login", width=110, command=self.login)
-        self.login_btn.pack(side="left", padx=10)
+        # Wide windows show two work areas. Narrow windows switch between them.
+        self.workspace = ctk.CTkFrame(self, fg_color="transparent")
+        self.workspace.grid(row=1, column=0, sticky="nsew", padx=16, pady=6)
+        self.workspace.grid_rowconfigure(1, weight=1)
+        self.workspace.grid_columnconfigure(0, weight=1, uniform="workspace")
+        self.workspace.grid_columnconfigure(1, weight=1, uniform="workspace")
+        self.pane_switch = ctk.CTkSegmentedButton(self.workspace,
+            values=["Channels & topics", "Download settings"], command=self.show_workspace_pane)
+        self.pane_switch.set("Channels & topics")
+        self.source_panel = ctk.CTkFrame(self.workspace)
+        self.source_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.settings_panel = ctk.CTkScrollableFrame(self.workspace)
+        self.settings_panel.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self._compact_layout = None
+        self.bind("<Configure>", self._on_window_resize)
 
-        # ── Channel ──
-        ch_frame = ctk.CTkFrame(content)
-        ch_frame.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(ch_frame, text="📢 Channel / Group", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
+        source = self.source_panel
+        source.grid_columnconfigure(0, weight=1)
+        source.grid_rowconfigure(6, weight=1)
+        ctk.CTkLabel(source, text="1  Choose channels & topics", font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=14, pady=(10, 4))
         self.channel_var = ctk.StringVar()
-        self.channel_menu = ctk.CTkOptionMenu(ch_frame, variable=self.channel_var, values=["Login first..."], state="disabled", width=500, command=self.select_channel)
-        self.channel_search = ctk.CTkEntry(ch_frame, placeholder_text="Search channels or groups…")
-        self.channel_search.pack(fill="x", padx=10, pady=5)
+        self.channel_search = ctk.CTkEntry(source, placeholder_text="Search channels or groups…")
+        self.channel_search.grid(row=1, column=0, sticky="ew", padx=14, pady=4)
         self.channel_search.bind("<KeyRelease>", self.filter_channels)
         self.channel_search.bind("<Return>", self.choose_filtered_channel)
-        self.channel_menu.pack(fill="x", padx=10, pady=5)
-        self.channel_hint = ctk.CTkLabel(ch_frame, text="Log in to load channels and groups.")
-        self.channel_hint.pack(anchor="w", padx=10)
-        self.topic_search = ctk.CTkEntry(ch_frame, placeholder_text="Search topics…")
-        self.topic_search.pack(fill="x", padx=10, pady=5)
+        self.channel_menu = ctk.CTkOptionMenu(source, variable=self.channel_var,
+            values=["Log in first…"], state="disabled", width=200, command=self.select_channel)
+        self.channel_menu.grid(row=2, column=0, sticky="ew", padx=14, pady=4)
+        self.channel_hint = ctk.CTkLabel(source, text="Log in to load channels and groups.", anchor="w", wraplength=400)
+        self.channel_hint.grid(row=3, column=0, sticky="ew", padx=14, pady=2)
+        self.topic_search = ctk.CTkEntry(source, placeholder_text="Search topics…")
+        self.topic_search.grid(row=4, column=0, sticky="ew", padx=14, pady=(8, 4))
         self.topic_search.bind("<KeyRelease>", self.filter_topics)
-        tools = ctk.CTkFrame(ch_frame, fg_color="transparent")
-        tools.pack(fill="x", padx=10)
-        ctk.CTkButton(tools, text="Select visible", command=lambda: self.select_topics(True)).pack(side="left", padx=4)
-        ctk.CTkButton(tools, text="Clear selection", command=lambda: self.select_topics(False)).pack(side="left", padx=4)
-        self.topic_list = ctk.CTkScrollableFrame(ch_frame, height=135)
-        self.topic_list.pack(fill="x", padx=10, pady=5)
-        self.topic_count = ctk.CTkLabel(ch_frame, text="No topics selected")
-        self.topic_count.pack(anchor="w", padx=10)
+        actions = ctk.CTkFrame(source, fg_color="transparent")
+        actions.grid(row=5, column=0, sticky="ew", padx=10, pady=4)
+        ctk.CTkButton(actions, text="Select visible", width=125, command=lambda: self.select_topics(True)).pack(side="left", padx=4)
+        ctk.CTkButton(actions, text="Clear selection", width=125, command=lambda: self.select_topics(False)).pack(side="left", padx=4)
+        self.topic_list = ctk.CTkScrollableFrame(source, height=60)
+        self.topic_list.grid(row=6, column=0, sticky="nsew", padx=14, pady=4)
+        self.topic_count = ctk.CTkLabel(source, text="No topics selected", anchor="w", wraplength=400)
+        self.topic_count.grid(row=7, column=0, sticky="ew", padx=14)
+        self.topic_var = ctk.StringVar(value="Log in and choose a channel or group.")
+        # Retained as controller state for topic loading; the visible UI is checkboxes.
+        self.topic_menu = ctk.CTkOptionMenu(source, variable=self.topic_var, values=["No topic required"], state="disabled", width=200)
+        self.topic_status = ctk.CTkLabel(source, textvariable=self.topic_var, anchor="w", wraplength=400)
+        self.topic_status.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 10))
 
-        self.topic_var = ctk.StringVar(value="No topic required")
-        self.topic_menu = ctk.CTkOptionMenu(ch_frame, variable=self.topic_var,
-            values=["No topic required"], state="disabled", width=500)
-        ctk.CTkLabel(ch_frame, textvariable=self.topic_var).pack(anchor="w", padx=10, pady=5)
-
-        # ── File Type ──
-        type_frame = ctk.CTkFrame(content)
-        type_frame.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(type_frame, text="🗂 File Type Filter", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
-
+        settings = self.settings_panel
+        ctk.CTkLabel(settings, text="2  Configure downloads", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=10, pady=(6, 4))
+        type_frame = ctk.CTkFrame(settings)
+        type_frame.pack(fill="x", padx=4, pady=4)
+        ctk.CTkLabel(type_frame, text="Media types · combine any selections", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=6)
         self.media_type = ctk.StringVar(value="all")
         quick_row = ctk.CTkFrame(type_frame, fg_color="transparent")
-        quick_row.pack(fill="x", padx=10)
-
-        for index, (label, value) in enumerate([("Photos", "photo"), ("Videos", "video"), ("Audio", "audio"), ("PDF", ".pdf"), ("Word", ".docx"), ("Excel", ".xlsx"), ("ZIP", ".zip"), ("Custom extensions", "custom")]):
+        quick_row.pack(fill="x", padx=8)
+        for column in range(3):
+            quick_row.grid_columnconfigure(column, weight=1)
+        for index, (label, value) in enumerate([
+            ("Photos", "photo"), ("Videos", "video"), ("Audio", "audio"),
+            ("PDF", ".pdf"), ("Word", ".docx"), ("Excel", ".xlsx"),
+            ("ZIP", ".zip"), ("Custom", "custom"),
+        ]):
             var = ctk.BooleanVar(value=value in ("photo", "video"))
             self.media_checks[value] = var
-            ctk.CTkCheckBox(quick_row, text=label, variable=var).grid(row=index//3, column=index%3, sticky="w", padx=5, pady=6)
+            ctk.CTkCheckBox(quick_row, text=label, width=80, variable=var).grid(
+                row=index//3, column=index%3, sticky="w", padx=4, pady=5)
         self.all_media = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(type_frame, text="All media (overrides type selections)", variable=self.all_media).pack(anchor="w", padx=15, pady=5)
-
-        custom_row = ctk.CTkFrame(type_frame, fg_color="transparent")
-        custom_row.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(custom_row, text="Custom:").pack(side="left")
-        self.custom_ext = ctk.CTkEntry(custom_row, width=200, placeholder_text=".psd / .dwg / .pdf,.xlsx,.csv")
-        self.custom_ext.pack(side="left", padx=8)
+        ctk.CTkCheckBox(type_frame, text="All media (overrides selections)", variable=self.all_media).pack(anchor="w", padx=12, pady=6)
+        self.custom_ext = ctk.CTkEntry(type_frame, placeholder_text="Custom extensions: .pdf,.csv")
+        self.custom_ext.pack(fill="x", padx=12, pady=(0, 10))
         self.custom_ext.bind("<Key>", lambda e: self.media_checks["custom"].set(True))
 
-        # ── Limit ──
-        limit_frame = ctk.CTkFrame(content)
-        limit_frame.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(limit_frame, text="How many new files per topic / channel", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
-
+        limit_frame = ctk.CTkFrame(settings)
+        limit_frame.pack(fill="x", padx=4, pady=4)
+        ctk.CTkLabel(limit_frame, text="New files per topic / channel", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=6)
         self.limit_mode = ctk.StringVar(value="all")
         limit_row = ctk.CTkFrame(limit_frame, fg_color="transparent")
-        limit_row.pack(fill="x", padx=10)
-
-        for index, (label, value) in enumerate([("Last 20","20"),("Last 50","50"),("Last 100","100"),("All","all"),("Custom","custom")]):
-            ctk.CTkRadioButton(limit_row, text=label, variable=self.limit_mode, value=value).grid(row=index//3, column=index%3, sticky="w", padx=8, pady=5)
-
-        custom_limit_row = ctk.CTkFrame(limit_frame, fg_color="transparent")
-        custom_limit_row.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(custom_limit_row, text="Custom number:").pack(side="left")
-        self.custom_limit = ctk.CTkEntry(custom_limit_row, width=100, placeholder_text="e.g. 23")
-        self.custom_limit.pack(side="left", padx=8)
+        limit_row.pack(fill="x", padx=8)
+        for column in range(3):
+            limit_row.grid_columnconfigure(column, weight=1)
+        for index, (label, value) in enumerate([("Last 20", "20"), ("Last 50", "50"), ("Last 100", "100"), ("All", "all"), ("Custom", "custom")]):
+            ctk.CTkRadioButton(limit_row, text=label, width=85, variable=self.limit_mode, value=value).grid(
+                row=index//3, column=index%3, sticky="w", padx=4, pady=4)
+        self.custom_limit = ctk.CTkEntry(limit_frame, placeholder_text="Custom number, e.g. 23")
+        self.custom_limit.pack(fill="x", padx=12, pady=(4, 10))
         self.custom_limit.bind("<Key>", lambda e: self.limit_mode.set("custom"))
-
-        # ── Download Order ──
-        dir_frame = ctk.CTkFrame(content)
-        dir_frame.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(dir_frame, text="📅 Download Order", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
-        dir_row = ctk.CTkFrame(dir_frame, fg_color="transparent")
-        dir_row.pack(fill="x", padx=10, pady=5)
+        order = ctk.CTkFrame(settings)
+        order.pack(fill="x", padx=4, pady=4)
+        ctk.CTkLabel(order, text="Download order", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(6, 0))
         self.reverse = ctk.BooleanVar(value=False)
-        ctk.CTkRadioButton(dir_row, text="Newest → Oldest (default)", variable=self.reverse, value=False).pack(side="left", padx=10)
-        ctk.CTkRadioButton(dir_row, text="Oldest → Newest", variable=self.reverse, value=True).pack(side="left", padx=10)
-
-        # ── Folder ──
-        folder_frame = ctk.CTkFrame(content)
-        folder_frame.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(folder_frame, text="📁 Save To", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
+        for label, value in [("Newest → Oldest", False), ("Oldest → Newest", True)]:
+            ctk.CTkRadioButton(order, text=label, variable=self.reverse, value=value).pack(anchor="w", padx=12, pady=4)
+        folder_frame = ctk.CTkFrame(settings)
+        folder_frame.pack(fill="x", padx=4, pady=(4, 8))
+        ctk.CTkLabel(folder_frame, text="Save to", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(6, 0))
         folder_row = ctk.CTkFrame(folder_frame, fg_color="transparent")
-        folder_row.pack(fill="x", padx=10)
+        folder_row.pack(fill="x", padx=12, pady=(4, 10))
         self.folder_path = ctk.StringVar(value=os.path.expanduser("~/Downloads/Telegram"))
-        ctk.CTkEntry(folder_row, textvariable=self.folder_path).pack(side="left", padx=5, fill="x", expand=True)
-        ctk.CTkButton(folder_row, text="Browse", width=80, command=self.browse).pack(side="left")
+        ctk.CTkEntry(folder_row, textvariable=self.folder_path).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(folder_row, text="Browse", width=80, command=self.browse).pack(side="right")
 
-        # ── Buttons ──
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(pady=8)
-        self.start_btn  = ctk.CTkButton(btn_row, text="⬇ Start",  width=130, state="disabled", command=self.start_download)
-        self.pause_btn  = ctk.CTkButton(btn_row, text="⏸ Pause",  width=130, state="disabled", command=self.pause)
-        self.cancel_btn = ctk.CTkButton(btn_row, text="⛔ Cancel", width=130, state="disabled", fg_color="red", command=self.cancel)
-        for btn in [self.start_btn, self.pause_btn, self.cancel_btn]:
-            btn.pack(side="left", padx=8)
-
-        # ── Progress ──
-        self.progress = ctk.CTkProgressBar(self, width=620)
-        self.progress.pack(fill="x", padx=15, pady=4)
-        self.progress.set(0)
-        self.progress_label = ctk.CTkLabel(self, text="Ready")
-        self.progress_label.pack()
-
-        # ── Tabs ──
-        tab = ctk.CTkTabview(content)
-        tab.pack(fill="both", expand=True, padx=15, pady=5)
-        tab.add("📋 Log")
-        tab.add("🕘 History")
-
-        self.log_box = ctk.CTkTextbox(tab.tab("📋 Log"), font=("Courier", 11))
+        # Activity is outside the settings scroll, as are all download controls.
+        self.activity = ctk.CTkFrame(self)
+        self.activity.grid(row=2, column=0, sticky="ew", padx=16, pady=4)
+        activity_heading = ctk.CTkFrame(self.activity, fg_color="transparent")
+        activity_heading.pack(fill="x", padx=10, pady=4)
+        ctk.CTkLabel(activity_heading, text="Activity", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        self.activity_toggle = ctk.CTkButton(activity_heading, text="Hide activity", width=110, command=self.toggle_activity)
+        self.activity_toggle.pack(side="right")
+        self.activity_tabs = ctk.CTkTabview(self.activity, height=130)
+        self.activity_tabs.pack(fill="x", padx=8, pady=(0, 6))
+        self.activity_tabs.add("Log")
+        self.activity_tabs.add("History")
+        self.log_box = ctk.CTkTextbox(self.activity_tabs.tab("Log"), height=70, font=("Courier", 11), state="disabled")
         self.log_box.pack(fill="both", expand=True)
-
-        self.history_box = ctk.CTkTextbox(tab.tab("🕘 History"), font=("Courier", 11))
+        self.history_box = ctk.CTkTextbox(self.activity_tabs.tab("History"), height=70, font=("Courier", 11))
         self.history_box.pack(fill="both", expand=True)
+        self._activity_visible = True
         self._load_history_tab()
+        footer = ctk.CTkFrame(self)
+        footer.grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 12))
+        footer.grid_columnconfigure(0, weight=1)
+        self.progress_label = ctk.CTkLabel(footer, text="Ready · log in to choose a source", anchor="w")
+        self.progress_label.grid(row=0, column=0, sticky="ew", padx=12, pady=(6, 0))
+        self.progress = ctk.CTkProgressBar(footer)
+        self.progress.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 10))
+        self.progress.set(0)
+        buttons = ctk.CTkFrame(footer, fg_color="transparent")
+        buttons.grid(row=0, column=1, rowspan=2, padx=8, pady=8)
+        self.start_btn = ctk.CTkButton(buttons, text="Start", width=88, state="disabled", command=self.start_download)
+        self.pause_btn = ctk.CTkButton(buttons, text="Pause", width=88, state="disabled", command=self.pause)
+        self.cancel_btn = ctk.CTkButton(buttons, text="Cancel", width=88, state="disabled", fg_color="#963b42", command=self.cancel)
+        for button in (self.start_btn, self.pause_btn, self.cancel_btn):
+            button.pack(side="left", padx=4)
+        if self.winfo_screenheight() < 900:
+            self.toggle_activity()
+        self.after_idle(self._refresh_layout)
+
+    def toggle_account(self):
+        self._account_visible = not self._account_visible
+        if self._account_visible:
+            self.account_fields.grid()
+        else:
+            self.account_fields.grid_remove()
+        self.account_toggle.configure(text="Hide login" if self._account_visible else "Show login")
+
+    def toggle_activity(self):
+        self._activity_visible = not self._activity_visible
+        if self._activity_visible:
+            self.activity_tabs.pack(fill="x", padx=8, pady=(0, 6))
+        else:
+            self.activity_tabs.pack_forget()
+        self.activity_toggle.configure(text="Hide activity" if self._activity_visible else "Show activity")
+
+    def _on_window_resize(self, event):
+        if event.widget is self:
+            self._refresh_layout()
+
+    def _refresh_layout(self):
+        compact = self.winfo_width() < 1040
+        width = self.winfo_width() - 76 if compact else (self.winfo_width() - 100) // 2
+        for label in (self.channel_hint, self.topic_count, self.topic_status):
+            label.configure(wraplength=max(260, width))
+        if compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        if compact:
+            self.workspace.grid_columnconfigure(0, weight=1, uniform="")
+            self.workspace.grid_columnconfigure(1, weight=0, uniform="")
+            self.pane_switch.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            self.show_workspace_pane(self.pane_switch.get())
+        else:
+            self.workspace.grid_columnconfigure(0, weight=1, uniform="workspace")
+            self.workspace.grid_columnconfigure(1, weight=1, uniform="workspace")
+            self.pane_switch.grid_remove()
+            self.source_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+            self.settings_panel.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+
+    def show_workspace_pane(self, pane):
+        if not self._compact_layout:
+            return
+        self.source_panel.grid_remove()
+        self.settings_panel.grid_remove()
+        panel = self.source_panel if pane == "Channels & topics" else self.settings_panel
+        panel.grid(row=1, column=0, sticky="nsew", padx=0)
 
     def browse(self):
         folder = filedialog.askdirectory()
