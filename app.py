@@ -13,11 +13,14 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Telegram Media Downloader")
-        self.geometry("680x880")
+        self.geometry("680x960")
         self.resizable(False, False)
         self.downloader = None
         self.loop = None
         self.channels = []
+        self.topics = {}
+        self.topic_generation = 0
+        self.busy = False
         self._build()
 
     def _build(self):
@@ -53,8 +56,13 @@ class App(ctk.CTk):
         ch_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(ch_frame, text="📢 Channel / Group", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         self.channel_var = ctk.StringVar()
-        self.channel_menu = ctk.CTkOptionMenu(ch_frame, variable=self.channel_var, values=["Login first..."], state="disabled", width=500)
+        self.channel_menu = ctk.CTkOptionMenu(ch_frame, variable=self.channel_var, values=["Login first..."], state="disabled", width=500, command=self.select_channel)
         self.channel_menu.pack(padx=10, pady=5)
+
+        self.topic_var = ctk.StringVar(value="No topic required")
+        self.topic_menu = ctk.CTkOptionMenu(ch_frame, variable=self.topic_var,
+            values=["No topic required"], state="disabled", width=500)
+        self.topic_menu.pack(padx=10, pady=5)
 
         # ── File Type ──
         type_frame = ctk.CTkFrame(self)
@@ -179,10 +187,8 @@ class App(ctk.CTk):
         self.downloader = TelegramDownloader(int(api_id), api_hash, phone)
         self.after(0, lambda: self.login_btn.configure(state="disabled"))
         self.log("🔄 Connecting to Telegram...")
-        threading.Thread(
-            target=lambda: self.loop.run_until_complete(self._async_login()),
-            daemon=True
-        ).start()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        asyncio.run_coroutine_threadsafe(self._async_login(), self.loop)
 
     async def _async_login(self):
         try:
@@ -200,11 +206,12 @@ class App(ctk.CTk):
 
             channels = await self.downloader.get_channels()
             self.channels = channels
-            names = [f"{'📢' if c.is_channel else '👥'} {c.name}" for c in channels]
+            names = [f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels]
 
             self.after(0, lambda: self.channel_menu.configure(values=names, state="normal"))
-            self.after(0, lambda: self.channel_menu.set(names[0]))
-            self.after(0, lambda: self.start_btn.configure(state="normal"))
+            if names:
+                self.after(0, lambda: self.channel_menu.set(names[0]))
+                self.after(0, self.select_channel)
             self.after(0, lambda: self.login_btn.configure(state="normal"))
             self.log(f"📋 {len(channels)} channels & groups loaded.")
 
@@ -221,12 +228,49 @@ class App(ctk.CTk):
         else:
             self.log("❌ No OTP entered or login not started.")
 
+    def selected_channel(self):
+        return next(c for c in self.channels
+            if f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" == self.channel_var.get())
+
+    def select_channel(self, _value=None):
+        self.topic_generation += 1
+        generation = self.topic_generation
+        self.topics = {}
+        selected = self.selected_channel()
+        self.start_btn.configure(state="disabled")
+        self.topic_menu.configure(state="disabled")
+        if not getattr(selected.entity, "forum", False):
+            self.topic_var.set("No topic required")
+            self.start_btn.configure(state="normal")
+            return
+        self.topic_var.set("Loading topics...")
+        async def load():
+            try:
+                topics = await self.downloader.get_topics(selected)
+                self.after(0, apply_topics, topics, None)
+            except Exception as error:
+                self.after(0, apply_topics, [], str(error))
+        def apply_topics(topics, error):
+            if generation != self.topic_generation:
+                return
+            self.topics = {f"{t.title} [{t.id}]": t.id for t in topics}
+            if error or not topics:
+                self.topic_var.set("Topics unavailable — reselect group to retry")
+                self.log(f"❌ Could not load topics: {error or 'No topics returned'}")
+                return
+            self.topic_menu.configure(values=list(self.topics), state="normal")
+            self.topic_var.set(next(iter(self.topics)))
+            self.start_btn.configure(state="normal")
+        asyncio.run_coroutine_threadsafe(load(), self.loop)
+
     def start_download(self):
-        idx = next(
-            i for i, c in enumerate(self.channels)
-            if f"{'📢' if c.is_channel else '👥'} {c.name}" == self.channel_var.get()
-        )
-        selected = self.channels[idx]
+        if self.busy:
+            return
+        selected = self.selected_channel()
+        topic_id = self.topics.get(self.topic_var.get())
+        if getattr(selected.entity, "forum", False) and topic_id is None:
+            self.log("Select a topic first.")
+            return
 
         selected_type = self.media_type.get()
         if selected_type == "custom":
@@ -237,6 +281,14 @@ class App(ctk.CTk):
 
         folder = os.path.join(self.folder_path.get(), selected.name.replace("/", "_"))
 
+        history_name = selected.name
+        if topic_id is not None:
+            folder = os.path.join(folder, f"topic_{topic_id}")
+            history_name += f" / {self.topic_var.get()}"
+        self.busy = True
+        self.channel_menu.configure(state="disabled")
+        self.topic_menu.configure(state="disabled")
+        reverse = self.reverse.get()
         self.after(0, lambda: self.progress.set(0))
         self.after(0, lambda: self.progress_label.configure(text="Starting..."))
         self.after(0, lambda: self.start_btn.configure(state="disabled"))
@@ -250,26 +302,36 @@ class App(ctk.CTk):
             self.after(0, lambda: self.progress.set(min(fraction, 1.0)))
 
         def on_done(count, skipped):
-            save_history(selected.name, folder, count)
+            save_history(history_name, folder, count)
             self.after(0, self._load_history_tab)
             self.log(f"\n🎉 Done! {count} downloaded, {skipped} skipped.")
             self.log(f"📁 Saved to: {os.path.abspath(folder)}")
             self.after(0, lambda: self.progress.set(1))
             self.after(0, lambda: self.progress_label.configure(text=f"✅ Complete — {count} files"))
-            self.after(0, lambda: self.start_btn.configure(state="normal"))
+            self.after(0, lambda: self.start_btn.configure(state="disabled"))
             self.after(0, lambda: self.pause_btn.configure(state="disabled"))
             self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
 
-        threading.Thread(
-            target=lambda: self.loop.run_until_complete(
-                self.downloader.download(
+        async def run_download():
+            try:
+                await self.downloader.download(
                     selected, folder, selected_type,
                     limit_mode, custom_limit,
-                    self.reverse.get(),
-                    on_progress, self.log, on_done
+                    reverse,
+                    on_progress, self.log, on_done, topic_id=topic_id
                 )
-            ), daemon=True
-        ).start()
+            except Exception as error:
+                self.log(f"❌ Download error: {error}")
+            finally:
+                self.after(0, finish)
+        def finish():
+            self.busy = False
+            self.channel_menu.configure(state="normal")
+            self.topic_menu.configure(state="normal" if self.topics else "disabled")
+            self.start_btn.configure(state="normal")
+            self.pause_btn.configure(state="disabled", text="⏸ Pause")
+            self.cancel_btn.configure(state="disabled")
+        asyncio.run_coroutine_threadsafe(run_download(), self.loop)
 
     def pause(self):
         self.downloader.paused = not self.downloader.paused
@@ -282,4 +344,5 @@ class App(ctk.CTk):
         self.log("⛔ Cancelling...")
         self.after(0, lambda: self.pause_btn.configure(state="disabled"))
         self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
-        self.after(0, lambda: self.start_btn.configure(state="normal"))
+        self.after(0, lambda: self.start_btn.configure(state="disabled"))
+
