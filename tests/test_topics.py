@@ -47,6 +47,20 @@ class TopicsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(d.load_last_id(channel.id, 7, '.pdf'), 0)
                 self.assertEqual(calls[0]['min_id'], 0)
 
+    async def test_normal_channel_and_failed_retry(self):
+        for forum, failure in ((False, False), (True, True)):
+            with tempfile.TemporaryDirectory() as folder, patch.object(d, 'SYNC_FILE', str(Path(folder)/'sync.json')), patch.object(d.asyncio, 'sleep', new=AsyncMock()):
+                m = message(20, 7 if forum else None)
+                if failure:
+                    m.download_media.side_effect = OSError('offline')
+                async def iterate(*args, **kwargs):
+                    yield m
+                downloader = d.TelegramDownloader.__new__(d.TelegramDownloader)
+                downloader.client = NS(iter_messages=iterate)
+                await downloader.download(NS(id=12, entity=NS(forum=forum)), folder, 'all', 'all', 20, False, lambda *a: None, lambda *a: None, lambda *a: None, topic_id=7 if forum else None)
+                self.assertEqual(d.load_last_id(12, 7 if forum else None, 'all'), 0 if failure else 20)
+                self.assertEqual(m.download_media.await_count, 5 if failure else 1)
+
     async def test_topic_pagination(self):
         topic = NS(id=7, title='Files', top_message=90, date=1)
         client = AsyncMock(side_effect=[NS(topics=[topic], messages=[NS(id=90, date=2)]), NS(topics=[], messages=[])])
