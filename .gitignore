@@ -1,30 +1,98 @@
-# Telegram session files — never upload these
-*.session
-*.session-journal
+# Authentication/session material (including SQLite sidecars and backups)
+*.session*
+.telegram-downloader/
+*.sqlite*
+*.db
+*.db-*
 
-# Sync and history data
-sync_state.json
-download_history.json
+# Environment, secrets and local configuration
+.env
+.env.*
+*.env
+.envrc
+.secrets/
+secrets.*
+credentials.*
+config.json
+config.local.*
+local_config.*
+*.local.json
+*.local.toml
+*.local.yaml
+*.local.yml
 
-# PyInstaller build files
+# User-specific state, logs, downloads and interrupted transfers
+*history*.json
+*sync*state*.json
+.local-state-*.tmp
+*.log
+logs/
+downloads/
+Downloads/
+Telegram/
+media/
+*.part
+.telegram-*
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.mp4
+*.mkv
+*.mov
+*.mp3
+*.ogg
+*.wav
+*.pdf
+*.zip
+
+# Build products, caches and virtual environments
 build/
 dist/
 *.spec
-
-# Python cache
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Environment
-.env
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage*
+htmlcov/
+.venv/
 venv/
 env/
+ENV/
+.tox/
+.nox/
+*.egg-info/
 
-# OS files
+# OS/editor files
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
 
-# Downloaded media — never upload
-downloads/
+# Other local secrets and download formats
+.config/
+*.pem
+*.key
+*.p12
+*.pfx
+auth*.json
+user_data/
+*.bin
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.csv
+*.7z
+*.rar
+*.tar
+*.gz
+*.txt
+!requirements*.txt
+# Generated group/topic folders, even for otherwise unknown media extensions
+*_-[0-9]*/
+topic_[0-9]*/

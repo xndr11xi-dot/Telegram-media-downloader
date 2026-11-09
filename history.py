@@ -1,14 +1,12 @@
-import json
-import os
 from datetime import datetime
+from local_data import read_json, write_json
 
 HISTORY_FILE = "download_history.json"
 
+
 def load_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r") as f:
-            return json.load(f)
-    return []
+    return read_json(HISTORY_FILE, [])
+
 
 def save_history(channel_name, folder, count):
     history = load_history()
@@ -16,7 +14,6 @@ def save_history(channel_name, folder, count):
         "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "channel": channel_name,
         "folder": folder,
-        "files": count
+        "files": count,
     })
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(history, f, indent=2)
+    write_json(HISTORY_FILE, history)

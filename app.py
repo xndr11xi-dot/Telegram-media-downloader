@@ -3,7 +3,7 @@ from tkinter import filedialog
 import asyncio
 import threading
 import os
-from downloader import TelegramDownloader
+from downloader import TelegramDownloader, group_folder
 from history import load_history, save_history
 
 ctk.set_appearance_mode("dark")
@@ -13,35 +13,40 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Telegram Media Downloader")
-        self.geometry("680x880")
-        self.resizable(False, False)
+        self.geometry(f"780x{min(900, self.winfo_screenheight() - 100)}")
+        self.resizable(True, True)
         self.downloader = None
         self.loop = None
         self.channels = []
+        self.topics = {}
+        self.topic_generation = 0
+        self.busy = False
         self._build()
 
     def _build(self):
+        content = ctk.CTkScrollableFrame(self)
+        content.pack(fill="both", expand=True)
         # ── Credentials ──
-        cred = ctk.CTkFrame(self)
+        cred = ctk.CTkFrame(content)
         cred.pack(fill="x", padx=15, pady=8)
         ctk.CTkLabel(cred, text="🔑 Credentials", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
         for label, attr, placeholder in [
-            ("API ID",   "api_id",   "123456"),
+            ("API ID",   "api_id",   "Your API ID"),
             ("API Hash", "api_hash", "abcdef..."),
-            ("Phone",    "phone",    "+1234567890"),
+            ("Phone",    "phone",    "Phone with country code"),
         ]:
             row = ctk.CTkFrame(cred, fg_color="transparent")
             row.pack(fill="x", padx=10, pady=2)
             ctk.CTkLabel(row, text=label, width=80).pack(side="left")
-            entry = ctk.CTkEntry(row, width=350, placeholder_text=placeholder)
+            entry = ctk.CTkEntry(row, width=350, placeholder_text=placeholder, show="*" if attr in ("api_hash", "phone") else "")
             entry.pack(side="left", padx=5)
             setattr(self, attr, entry)
 
         login_row = ctk.CTkFrame(cred, fg_color="transparent")
         login_row.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(login_row, text="OTP Code", width=80).pack(side="left")
-        self.otp = ctk.CTkEntry(login_row, width=150, placeholder_text="Check Telegram app")
+        self.otp = ctk.CTkEntry(login_row, width=150, placeholder_text="Check Telegram app", show="*")
         self.otp.pack(side="left", padx=5)
         self.otp_btn = ctk.CTkButton(login_row, text="Submit OTP", width=110, state="disabled", command=self.submit_otp)
         self.otp_btn.pack(side="left", padx=5)
@@ -49,15 +54,20 @@ class App(ctk.CTk):
         self.login_btn.pack(side="left", padx=10)
 
         # ── Channel ──
-        ch_frame = ctk.CTkFrame(self)
+        ch_frame = ctk.CTkFrame(content)
         ch_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(ch_frame, text="📢 Channel / Group", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         self.channel_var = ctk.StringVar()
-        self.channel_menu = ctk.CTkOptionMenu(ch_frame, variable=self.channel_var, values=["Login first..."], state="disabled", width=500)
+        self.channel_menu = ctk.CTkOptionMenu(ch_frame, variable=self.channel_var, values=["Login first..."], state="disabled", width=500, command=self.select_channel)
         self.channel_menu.pack(padx=10, pady=5)
 
+        self.topic_var = ctk.StringVar(value="No topic required")
+        self.topic_menu = ctk.CTkOptionMenu(ch_frame, variable=self.topic_var,
+            values=["No topic required"], state="disabled", width=500)
+        self.topic_menu.pack(padx=10, pady=5)
+
         # ── File Type ──
-        type_frame = ctk.CTkFrame(self)
+        type_frame = ctk.CTkFrame(content)
         type_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(type_frame, text="🗂 File Type Filter", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
@@ -76,7 +86,7 @@ class App(ctk.CTk):
         self.custom_ext.bind("<Key>", lambda e: self.media_type.set("custom"))
 
         # ── Limit ──
-        limit_frame = ctk.CTkFrame(self)
+        limit_frame = ctk.CTkFrame(content)
         limit_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(limit_frame, text="🔢 How Many Files", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
 
@@ -95,7 +105,7 @@ class App(ctk.CTk):
         self.custom_limit.bind("<Key>", lambda e: self.limit_mode.set("custom"))
 
         # ── Download Order ──
-        dir_frame = ctk.CTkFrame(self)
+        dir_frame = ctk.CTkFrame(content)
         dir_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(dir_frame, text="📅 Download Order", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         dir_row = ctk.CTkFrame(dir_frame, fg_color="transparent")
@@ -105,7 +115,7 @@ class App(ctk.CTk):
         ctk.CTkRadioButton(dir_row, text="Oldest → Newest", variable=self.reverse, value=True).pack(side="left", padx=10)
 
         # ── Folder ──
-        folder_frame = ctk.CTkFrame(self)
+        folder_frame = ctk.CTkFrame(content)
         folder_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(folder_frame, text="📁 Save To", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=10, pady=5)
         folder_row = ctk.CTkFrame(folder_frame, fg_color="transparent")
@@ -115,7 +125,7 @@ class App(ctk.CTk):
         ctk.CTkButton(folder_row, text="Browse", width=80, command=self.browse).pack(side="left")
 
         # ── Buttons ──
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row = ctk.CTkFrame(content, fg_color="transparent")
         btn_row.pack(pady=8)
         self.start_btn  = ctk.CTkButton(btn_row, text="⬇ Start",  width=130, state="disabled", command=self.start_download)
         self.pause_btn  = ctk.CTkButton(btn_row, text="⏸ Pause",  width=130, state="disabled", command=self.pause)
@@ -124,14 +134,14 @@ class App(ctk.CTk):
             btn.pack(side="left", padx=8)
 
         # ── Progress ──
-        self.progress = ctk.CTkProgressBar(self, width=620)
+        self.progress = ctk.CTkProgressBar(content, width=620)
         self.progress.pack(padx=15, pady=4)
         self.progress.set(0)
-        self.progress_label = ctk.CTkLabel(self, text="Ready")
+        self.progress_label = ctk.CTkLabel(content, text="Ready")
         self.progress_label.pack()
 
         # ── Tabs ──
-        tab = ctk.CTkTabview(self)
+        tab = ctk.CTkTabview(content)
         tab.pack(fill="both", expand=True, padx=15, pady=5)
         tab.add("📋 Log")
         tab.add("🕘 History")
@@ -175,14 +185,24 @@ class App(ctk.CTk):
             self.log("❌ Please fill in API ID, API Hash and Phone first.")
             return
 
+        if self.downloader is not None:
+            self.log("Restart the app to retry login or switch accounts.")
+            return
+        if not api_id.isdecimal() or int(api_id) <= 0:
+            self.log("Enter a valid numeric API ID.")
+            return
         self.loop = asyncio.new_event_loop()
-        self.downloader = TelegramDownloader(int(api_id), api_hash, phone)
+        try:
+            self.downloader = TelegramDownloader(int(api_id), api_hash, phone)
+        except Exception:
+            self.log("Could not initialize Telegram. Check local session permissions.")
+            self.loop.close()
+            self.loop = None
+            return
         self.after(0, lambda: self.login_btn.configure(state="disabled"))
         self.log("🔄 Connecting to Telegram...")
-        threading.Thread(
-            target=lambda: self.loop.run_until_complete(self._async_login()),
-            daemon=True
-        ).start()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        asyncio.run_coroutine_threadsafe(self._async_login(), self.loop)
 
     async def _async_login(self):
         try:
@@ -190,43 +210,90 @@ class App(ctk.CTk):
             if not await self.downloader.client.is_user_authorized():
                 await self.downloader.client.send_code_request(self.downloader.phone)
                 self.log("📱 OTP sent to your Telegram app! Enter it and click Submit OTP.")
-                self.after(0, lambda: self.otp_btn.configure(state="normal"))
                 self.downloader.otp_future = self.loop.create_future()
+                self.after(0, lambda: self.otp_btn.configure(state="normal"))
                 code = await self.downloader.otp_future
                 await self.downloader.client.sign_in(self.downloader.phone, code)
 
             self.log("✅ Logged in successfully!")
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
+            self.after(0, lambda: self.api_hash.delete(0, "end"))
+            self.after(0, lambda: self.phone.delete(0, "end"))
+            self.after(0, lambda: self.api_id.delete(0, "end"))
 
             channels = await self.downloader.get_channels()
             self.channels = channels
-            names = [f"{'📢' if c.is_channel else '👥'} {c.name}" for c in channels]
+            names = [f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels]
 
             self.after(0, lambda: self.channel_menu.configure(values=names, state="normal"))
-            self.after(0, lambda: self.channel_menu.set(names[0]))
-            self.after(0, lambda: self.start_btn.configure(state="normal"))
+            if names:
+                self.after(0, lambda: self.channel_menu.set(names[0]))
+                self.after(0, self.select_channel)
             self.after(0, lambda: self.login_btn.configure(state="normal"))
             self.log(f"📋 {len(channels)} channels & groups loaded.")
 
-        except Exception as e:
-            self.log(f"❌ Login error: {e}")
+        except Exception:
+            self.log("❌ Login failed. Check credentials and account authentication settings.")
             self.after(0, lambda: self.login_btn.configure(state="normal"))
+        finally:
+            self.downloader.otp_future = None
+            self.after(0, lambda: self.otp.delete(0, "end"))
+            self.after(0, lambda: self.otp_btn.configure(state="disabled"))
 
     def submit_otp(self):
         code = self.otp.get().strip()
         if code and self.downloader and self.downloader.otp_future:
-            self.loop.call_soon_threadsafe(self.downloader.otp_future.set_result, code)
+            self.otp.delete(0, "end")
+            future = self.downloader.otp_future
+            self.loop.call_soon_threadsafe(lambda: None if future.done() else future.set_result(code))
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
             self.log("✅ OTP submitted.")
         else:
             self.log("❌ No OTP entered or login not started.")
 
+    def selected_channel(self):
+        return next(c for c in self.channels
+            if f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" == self.channel_var.get())
+
+    def select_channel(self, _value=None):
+        self.topic_generation += 1
+        generation = self.topic_generation
+        self.topics = {}
+        selected = self.selected_channel()
+        self.start_btn.configure(state="disabled")
+        self.topic_menu.configure(state="disabled")
+        if not getattr(selected.entity, "forum", False):
+            self.topic_var.set("No topic required")
+            self.start_btn.configure(state="normal")
+            return
+        self.topic_var.set("Loading topics...")
+        async def load():
+            try:
+                topics = await self.downloader.get_topics(selected)
+                self.after(0, apply_topics, topics, None)
+            except Exception:
+                self.after(0, apply_topics, [], True)
+        def apply_topics(topics, error):
+            if generation != self.topic_generation:
+                return
+            self.topics = {f"{t.title} [{t.id}]": t.id for t in topics}
+            if error or not topics:
+                self.topic_var.set("Topics unavailable — reselect group to retry")
+                self.log("❌ Could not load topics. Reselect the group to retry.")
+                return
+            self.topic_menu.configure(values=list(self.topics), state="normal")
+            self.topic_var.set(next(iter(self.topics)))
+            self.start_btn.configure(state="normal")
+        asyncio.run_coroutine_threadsafe(load(), self.loop)
+
     def start_download(self):
-        idx = next(
-            i for i, c in enumerate(self.channels)
-            if f"{'📢' if c.is_channel else '👥'} {c.name}" == self.channel_var.get()
-        )
-        selected = self.channels[idx]
+        if self.busy:
+            return
+        selected = self.selected_channel()
+        topic_id = self.topics.get(self.topic_var.get())
+        if getattr(selected.entity, "forum", False) and topic_id is None:
+            self.log("Select a topic first.")
+            return
 
         selected_type = self.media_type.get()
         if selected_type == "custom":
@@ -235,8 +302,20 @@ class App(ctk.CTk):
         limit_mode = self.limit_mode.get()
         custom_limit = int(self.custom_limit.get()) if limit_mode == "custom" and self.custom_limit.get().isdigit() else 20
 
-        folder = os.path.join(self.folder_path.get(), selected.name.replace("/", "_"))
+        folder = group_folder(self.folder_path.get(), selected.name, selected.id)
 
+        history_name = selected.name
+        if topic_id is not None:
+            folder = os.path.join(folder, f"topic_{topic_id}")
+            history_name += f" / {self.topic_var.get()}"
+        self.log("Starting download for the selected channel/topic...")
+        self.busy = True
+        # Reset before scheduling so an immediate Cancel cannot be overwritten.
+        self.downloader.paused = False
+        self.downloader.cancelled = False
+        self.channel_menu.configure(state="disabled")
+        self.topic_menu.configure(state="disabled")
+        reverse = self.reverse.get()
         self.after(0, lambda: self.progress.set(0))
         self.after(0, lambda: self.progress_label.configure(text="Starting..."))
         self.after(0, lambda: self.start_btn.configure(state="disabled"))
@@ -250,26 +329,38 @@ class App(ctk.CTk):
             self.after(0, lambda: self.progress.set(min(fraction, 1.0)))
 
         def on_done(count, skipped):
-            save_history(selected.name, folder, count)
+            save_history(history_name, folder, count)
             self.after(0, self._load_history_tab)
-            self.log(f"\n🎉 Done! {count} downloaded, {skipped} skipped.")
+            self.log(f"Download finished: {count} downloaded, {skipped} skipped.")
             self.log(f"📁 Saved to: {os.path.abspath(folder)}")
-            self.after(0, lambda: self.progress.set(1))
-            self.after(0, lambda: self.progress_label.configure(text=f"✅ Complete — {count} files"))
-            self.after(0, lambda: self.start_btn.configure(state="normal"))
+            self.after(0, lambda: self.start_btn.configure(state="disabled"))
             self.after(0, lambda: self.pause_btn.configure(state="disabled"))
             self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
 
-        threading.Thread(
-            target=lambda: self.loop.run_until_complete(
-                self.downloader.download(
+        async def run_download():
+            try:
+                status = await self.downloader.download(
                     selected, folder, selected_type,
                     limit_mode, custom_limit,
-                    self.reverse.get(),
-                    on_progress, self.log, on_done
+                    reverse,
+                    on_progress, self.log, on_done, topic_id=topic_id, reset_controls=False
                 )
-            ), daemon=True
-        ).start()
+                if status == "complete":
+                    self.after(0, lambda: self.progress.set(1))
+                self.after(0, lambda: self.progress_label.configure(text=f"Download {status}"))
+            except Exception:
+                self.log("❌ Download failed. Check connection and local file permissions.")
+                self.after(0, lambda: self.progress_label.configure(text="Download failed"))
+            finally:
+                self.after(0, finish)
+        def finish():
+            self.busy = False
+            self.channel_menu.configure(state="normal")
+            self.topic_menu.configure(state="normal" if self.topics else "disabled")
+            self.start_btn.configure(state="normal")
+            self.pause_btn.configure(state="disabled", text="⏸ Pause")
+            self.cancel_btn.configure(state="disabled")
+        asyncio.run_coroutine_threadsafe(run_download(), self.loop)
 
     def pause(self):
         self.downloader.paused = not self.downloader.paused
@@ -282,4 +373,5 @@ class App(ctk.CTk):
         self.log("⛔ Cancelling...")
         self.after(0, lambda: self.pause_btn.configure(state="disabled"))
         self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
-        self.after(0, lambda: self.start_btn.configure(state="normal"))
+        self.after(0, lambda: self.start_btn.configure(state="disabled"))
+
