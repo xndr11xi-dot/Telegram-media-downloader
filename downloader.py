@@ -115,6 +115,7 @@ class TelegramDownloader:
 
     async def get_topics(self, channel):
         topics = {}
+        seen_ids = set()
         offset_date = offset_id = offset_topic = 0
         while True:
             page = await self.client(GetForumTopicsRequest(
@@ -123,13 +124,17 @@ class TelegramDownloader:
             valid = [t for t in page.topics if hasattr(t, "title")]
             fresh = [t for t in valid if t.id not in topics]
             topics.update((t.id, t) for t in valid)
-            if not page.topics:
+            seen_ids.update(t.id for t in page.topics)
+            total = getattr(page, "count", None)
+            if not page.topics or (total is not None and len(seen_ids) >= total):
                 break
             if not fresh:
                 raise RuntimeError("Topic pagination did not advance")
             last = valid[-1]
-            messages = {m.id: m for m in page.messages}
-            offset_date = getattr(messages.get(last.top_message), "date", last.date)
+            offset_date = last.date
+            if not getattr(page, "order_by_create_date", False):
+                top_message = next((m for m in page.messages if m.id == last.top_message), None)
+                offset_date = getattr(top_message, "date", None) or last.date
             offset_id, offset_topic = last.top_message, last.id
         return sorted(topics.values(), key=lambda t: (t.id != 1, t.title.casefold(), t.id))
 

@@ -429,9 +429,12 @@ class App(ctk.CTk):
             if generation != self.topic_generation:
                 return
             self.topics = {f"{t.title} [{t.id}]": t.id for t in topics}
-            if error or not topics:
+            if error:
                 self.topic_var.set("Topics unavailable — reselect group to retry")
                 self.log("❌ Could not load topics. Reselect the group to retry.")
+                return
+            if not topics:
+                self.topic_var.set("No topics available in this group.")
                 return
             self.topic_menu.configure(values=list(self.topics), state="normal")
             self.topic_var.set("Choose one or more topics below.")
