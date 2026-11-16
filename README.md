@@ -47,6 +47,15 @@ python main.py
 5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel).
 6. Click **Start**
 
+## Download from a message date
+
+Enter an optional date (YYYY-MM-DD, UTC) under Download order. Oldest → Newest
+includes messages on or after that date. Newest → Oldest includes messages on
+or before it. The entire cutoff day is included in both directions. Leave the
+date blank for the usual download behavior. Date-filtered runs use the same
+media filters and per-topic limits, and bypass the normal sync checkpoint so
+you can revisit older dates.
+
 ## Desktop layout
 
 Wide windows show channels and topics on the left and download settings on the
@@ -105,11 +114,11 @@ in again, and manage/revoke obsolete sessions from Telegram. Never upload them.
 API hashes, phone numbers and OTPs are masked; submitted OTPs and completed login
 fields are cleared. Raw exception messages are omitted from application logs.
 
-Downloads now use stable `<message-id>.<extension>` filenames, private temporary
+Downloads use stable `<message-id>_<YYYY-MM-DD>.<extension>` filenames, private temporary
 files and atomic replacement; interrupted transfers are removed. Group folders
 include a sanitized title and group ID, preventing path traversal and same-title
-collisions. Existing downloads under the older naming scheme are not migrated
-or recognized as completed files. The first run can therefore redownload them.
+collisions. Existing `<message-id>.<extension>` files in the same folder still count as
+already downloaded. New filenames use the Telegram message date in UTC.
 
 Checkpoints include group, topic, media filter and destination. Old checkpoints
 are deliberately ignored to avoid carrying forward potentially incomplete scans.

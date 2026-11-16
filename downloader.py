@@ -17,6 +17,7 @@ import json
 import hashlib
 import re
 import tempfile
+from datetime import timezone
 from local_data import read_json, write_json
 
 # ── Incremental sync ──
@@ -61,11 +62,29 @@ def group_folder(base, name, channel_id):
     return os.path.join(base, f"{component}_{channel_id}")
 
 
-def media_filename(message):
+def message_day(message):
+    sent_at = getattr(message, "date", None)
+    if sent_at is None:
+        return None
+    if sent_at.tzinfo is not None:
+        sent_at = sent_at.astimezone(timezone.utc)
+    return sent_at.date()
+
+
+def legacy_media_filename(message):
     extension = getattr(getattr(message, "file", None), "ext", None) or ".bin"
     if not re.fullmatch(r"\.[A-Za-z0-9]{1,10}", extension):
         extension = ".bin"
     return f"{message.id}{extension.lower()}"
+
+
+def media_filename(message):
+    legacy = legacy_media_filename(message)
+    day = message_day(message)
+    if day is None:
+        return legacy
+    stem, extension = os.path.splitext(legacy)
+    return f"{stem}_{day.isoformat()}{extension}"
 
 
 class TelegramDownloader:
@@ -172,7 +191,7 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True):
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None):
         forum = bool(getattr(channel.entity, "forum", False))
         if forum and (type(topic_id) is not int or topic_id < 1):
             raise ValueError("Select a topic before downloading from a forum.")
@@ -197,8 +216,9 @@ class TelegramDownloader:
         if file_limit is not None and (type(file_limit) is not int or file_limit < 1):
             raise ValueError("File limit must be positive")
 
-        # ── Incremental sync only for "All" mode ──
-        last_id = load_last_id(channel.id, topic_id, media_filter, folder) if limit_mode == "all" else 0
+        # A restricted date scan must not change or depend on the unrestricted checkpoint.
+        use_checkpoint = limit_mode == "all" and cutoff_date is None
+        last_id = load_last_id(channel.id, topic_id, media_filter, folder) if use_checkpoint else 0
         high_id = last_id
         complete = True
         if last_id:
@@ -208,6 +228,9 @@ class TelegramDownloader:
 
         direction = "Oldest → Newest" if reverse else "Newest → Oldest"
         on_log(f"📅 Order: {direction}")
+        if cutoff_date is not None:
+            relation = "on or after" if reverse else "on or before"
+            on_log(f"Message dates {relation} {cutoff_date.isoformat()} (UTC).")
 
         # General uses ordinary history; other forum topics are reply threads.
         scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
@@ -234,6 +257,11 @@ class TelegramDownloader:
             if not message.media:
                 continue
 
+            if cutoff_date is not None:
+                day = message_day(message)
+                if day is None or (reverse and day < cutoff_date) or (not reverse and day > cutoff_date):
+                    continue
+
             # Check match first — no disk read
             if not self.matches_filter(message, media_filter):
                 continue
@@ -242,7 +270,12 @@ class TelegramDownloader:
             destination = os.path.join(folder, filename)
             if os.path.islink(destination):
                 raise ValueError("Download destination must not be a symbolic link")
-            if os.path.isfile(destination):
+            legacy_destination = os.path.join(folder, legacy_media_filename(message))
+            if os.path.isfile(destination) or (
+                legacy_destination != destination
+                and not os.path.islink(legacy_destination)
+                and os.path.isfile(legacy_destination)
+            ):
                 on_log(f"⏭ Already exists: {message.id}")
                 skipped += 1
                 continue
@@ -289,7 +322,7 @@ class TelegramDownloader:
                 on_log(f"🎯 Reached target of {file_limit} files. Stopping.")
                 break
 
-        if complete and not self.cancelled and limit_mode == "all":
+        if complete and not self.cancelled and use_checkpoint:
             save_last_id(channel.id, high_id, topic_id, media_filter, folder)
         if not complete or self.cancelled:
             on_log("Download stopped without advancing sync.")
