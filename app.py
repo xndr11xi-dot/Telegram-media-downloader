@@ -3,6 +3,7 @@ from tkinter import filedialog
 import asyncio
 import threading
 import os
+from datetime import date
 from downloader import TelegramDownloader, group_folder
 from history import load_history, save_history
 
@@ -159,6 +160,11 @@ class App(ctk.CTk):
         self.reverse = ctk.BooleanVar(value=False)
         for label, value in [("Newest → Oldest", False), ("Oldest → Newest", True)]:
             ctk.CTkRadioButton(order, text=label, variable=self.reverse, value=value).pack(anchor="w", padx=12, pady=4)
+        ctk.CTkLabel(order, text="Optional message date (UTC)").pack(anchor="w", padx=12)
+        self.cutoff_date = ctk.CTkEntry(order, placeholder_text="YYYY-MM-DD")
+        self.cutoff_date.pack(fill="x", padx=12, pady=(2, 4))
+        ctk.CTkLabel(order, text="Newest first: on or before · Oldest first: on or after",
+                     wraplength=340, justify="left").pack(anchor="w", padx=12, pady=(0, 6))
         folder_frame = ctk.CTkFrame(settings)
         folder_frame.pack(fill="x", padx=4, pady=(4, 8))
         ctk.CTkLabel(folder_frame, text="Save to", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(6, 0))
@@ -479,6 +485,19 @@ class App(ctk.CTk):
             self.log("Choose a destination folder.")
             return
 
+        raw_date = self.cutoff_date.get().strip()
+        cutoff_date = None
+        if raw_date:
+            try:
+                cutoff_date = date.fromisoformat(raw_date)
+                if cutoff_date.isoformat() != raw_date:
+                    raise ValueError
+            except ValueError:
+                message = "Enter a valid message date as YYYY-MM-DD."
+                self.progress_label.configure(text=message)
+                self.log(message)
+                return
+
         folder = group_folder(self.folder_path.get(), selected.name, selected.id)
 
         base_folder = folder
@@ -524,7 +543,8 @@ class App(ctk.CTk):
                         self.log(f"Scope finished: {count} downloaded, {skipped} skipped.")
                     result = await self.downloader.download(
                         selected, folder, selected_type, limit_mode, custom_limit,
-                        reverse, on_progress, self.log, done, topic_id=current_topic, reset_controls=False)
+                        reverse, on_progress, self.log, done, topic_id=current_topic,
+                        reset_controls=False, cutoff_date=cutoff_date)
                     if result != "complete":
                         status = result
                         if result == "cancelled":
