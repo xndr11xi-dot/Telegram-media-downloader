@@ -3,7 +3,9 @@ from tkinter import filedialog
 import asyncio
 import threading
 import os
-from datetime import date
+import calendar
+from datetime import date, datetime, timezone
+from local_data import read_json, write_json
 from downloader import TelegramDownloader, group_folder
 from history import load_history, save_history
 
@@ -26,6 +28,13 @@ class App(ctk.CTk):
         self.topic_generation = 0
         self.busy = False
         self._build()
+        self._preferences_job = None
+        self._restore_preferences()
+        for variable in [self.folder_path, self.limit_mode, self.reverse, self.all_media, *self.media_checks.values()]:
+            variable.trace_add("write", self._queue_preferences)
+        for entry in (self.custom_ext, self.custom_limit, self.cutoff_date):
+            entry.bind("<KeyRelease>", self._queue_preferences, add="+")
+        self.protocol("WM_DELETE_WINDOW", self._close_window)
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
@@ -161,8 +170,11 @@ class App(ctk.CTk):
         for label, value in [("Newest → Oldest", False), ("Oldest → Newest", True)]:
             ctk.CTkRadioButton(order, text=label, variable=self.reverse, value=value).pack(anchor="w", padx=12, pady=4)
         ctk.CTkLabel(order, text="Optional message date (UTC)").pack(anchor="w", padx=12)
-        self.cutoff_date = ctk.CTkEntry(order, placeholder_text="YYYY-MM-DD")
-        self.cutoff_date.pack(fill="x", padx=12, pady=(2, 4))
+        date_row = ctk.CTkFrame(order, fg_color="transparent")
+        date_row.pack(fill="x", padx=12, pady=(2, 4))
+        self.cutoff_date = ctk.CTkEntry(date_row, placeholder_text="YYYY-MM-DD")
+        self.cutoff_date.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(date_row, text="Calendar", width=86, command=self.open_date_picker).pack(side="right")
         ctk.CTkLabel(order, text="Newest first: on or before · Oldest first: on or after",
                      wraplength=340, justify="left").pack(anchor="w", padx=12, pady=(0, 6))
         folder_frame = ctk.CTkFrame(settings)
@@ -210,6 +222,115 @@ class App(ctk.CTk):
         if self.winfo_screenheight() < 900:
             self.toggle_activity()
         self.after_idle(self._refresh_layout)
+
+    def _preferences_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "preferences.local.json")
+
+    def _restore_preferences(self):
+        try:
+            saved = read_json(self._preferences_path(), {})
+        except (OSError, UnicodeError):
+            saved = {}
+        for name in ("folder_path", "custom_ext", "custom_limit", "cutoff_date"):
+            value = saved.get(name)
+            if isinstance(value, str) and len(value) <= 4096:
+                widget = getattr(self, name)
+                if name == "folder_path":
+                    widget.set(value)
+                else:
+                    widget.delete(0, "end")
+                    widget.insert(0, value)
+        mode = saved.get("limit_mode")
+        if mode in ("all", "20", "50", "100", "custom"):
+            self.limit_mode.set(mode)
+        for name in ("reverse", "all_media"):
+            if type(saved.get(name)) is bool:
+                getattr(self, name).set(saved[name])
+        media = saved.get("media", {})
+        if isinstance(media, dict):
+            for name, variable in self.media_checks.items():
+                if type(media.get(name)) is bool:
+                    variable.set(media[name])
+
+    def _queue_preferences(self, *_args):
+        if self._preferences_job is not None:
+            self.after_cancel(self._preferences_job)
+        self._preferences_job = self.after(400, self._save_preferences)
+
+    def _save_preferences(self):
+        self._preferences_job = None
+        saved = {name: getattr(self, name).get() for name in (
+            "folder_path", "custom_ext", "custom_limit", "cutoff_date",
+            "limit_mode", "reverse", "all_media")}
+        saved["media"] = {name: variable.get() for name, variable in self.media_checks.items()}
+        try:
+            write_json(self._preferences_path(), saved)
+        except OSError:
+            self.log("Could not save preferences. Check local folder permissions.")
+
+    def _close_window(self):
+        if self._preferences_job is not None:
+            self.after_cancel(self._preferences_job)
+        self._save_preferences()
+        self.destroy()
+
+    def open_date_picker(self):
+        if getattr(self, "_calendar_window", None) is not None and self._calendar_window.winfo_exists():
+            self._calendar_window.lift()
+            return
+        try:
+            selected = date.fromisoformat(self.cutoff_date.get())
+        except ValueError:
+            selected = datetime.now(timezone.utc).date()
+        window = ctk.CTkToplevel(self)
+        self._calendar_window = window
+        window.title("Choose message date (UTC)")
+        window.resizable(False, False)
+        window.transient(self)
+        header = ctk.CTkFrame(window, fg_color="transparent")
+        header.pack(fill="x", padx=10, pady=10)
+        month_label = ctk.CTkLabel(header, width=180)
+        days = ctk.CTkFrame(window)
+        days.pack(padx=10, pady=(0, 10))
+        year, month = selected.year, selected.month
+
+        def choose(value):
+            self.cutoff_date.delete(0, "end")
+            self.cutoff_date.insert(0, value)
+            self._queue_preferences()
+            window.destroy()
+
+        def draw():
+            month_label.configure(text=f"{calendar.month_name[month]} {year}")
+            for child in days.winfo_children():
+                child.destroy()
+            for column, label in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
+                ctk.CTkLabel(days, text=label, width=36).grid(row=0, column=column)
+            for row, week in enumerate(calendar.monthcalendar(year, month), 1):
+                for column, day in enumerate(week):
+                    if day:
+                        value = date(year, month, day).isoformat()
+                        ctk.CTkButton(days, text=str(day), width=36,
+                            fg_color="#245d91" if value == self.cutoff_date.get() else "transparent",
+                            border_width=1, command=lambda value=value: choose(value)).grid(
+                                row=row, column=column, padx=2, pady=2)
+
+        def move(delta):
+            nonlocal year, month
+            index = year * 12 + month - 1 + delta
+            if 12 <= index < 120000:
+                year, month = divmod(index, 12)
+                month += 1
+                draw()
+
+        ctk.CTkButton(header, text="‹", width=36, command=lambda: move(-1)).pack(side="left")
+        month_label.pack(side="left")
+        ctk.CTkButton(header, text="›", width=36, command=lambda: move(1)).pack(side="left")
+        actions = ctk.CTkFrame(window, fg_color="transparent")
+        actions.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(actions, text="Today", width=100, command=lambda: choose(datetime.now(timezone.utc).date().isoformat())).pack(side="left", padx=4)
+        ctk.CTkButton(actions, text="Clear date", width=100, command=lambda: choose("")).pack(side="left", padx=4)
+        draw()
 
     def toggle_account(self):
         self._account_visible = not self._account_visible

@@ -47,6 +47,18 @@ python main.py
 5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel).
 6. Click **Start**
 
+## Saved preferences
+
+The app automatically remembers your download folder, media selections, custom
+extensions, file limit, download order and date cutoff. Preferences are stored
+privately in the ignored preferences.local.json file beside the application.
+Authentication fields are excluded. Channel and topic selections are chosen
+after login.
+
+Use Calendar beside the date field to select a day, navigate months, choose
+Today or clear the cutoff. The field also accepts YYYY-MM-DD directly. Calendar
+dates and the Today shortcut use UTC, matching message-date filtering.
+
 ## Download from a message date
 
 Enter an optional date (YYYY-MM-DD, UTC) under Download order. Oldest → Newest
