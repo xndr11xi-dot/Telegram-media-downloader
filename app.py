@@ -15,6 +15,24 @@ from history import load_history, save_history
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
 
+def format_bytes(value):
+    value = max(0, value)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+
+
+def format_eta(seconds):
+    if seconds is None:
+        return "—"
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {seconds:02d}s"
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -244,8 +262,20 @@ class App(ctk.CTk):
 
         self.activity = ctk.CTkFrame(self, fg_color=surface)
         self.activity.grid(row=2, column=0, sticky="ew", padx=16, pady=4)
-        self.activity_tabs = ctk.CTkTabview(self.activity, height=150)
+        self.activity_tabs = ctk.CTkTabview(self.activity, height=190)
         self.activity_tabs.pack(fill="x", padx=8, pady=6)
+        self.activity_tabs.add("Transfer")
+        transfer_tab = self.activity_tabs.tab("Transfer")
+        self.transfer_scope = ctk.CTkLabel(transfer_tab, text="No active download", anchor="w")
+        self.transfer_scope.pack(fill="x", padx=8)
+        self.transfer_file = ctk.CTkLabel(transfer_tab, text="Current file details appear here", anchor="w")
+        self.transfer_file.pack(fill="x", padx=8)
+        self.file_progress = ctk.CTkProgressBar(transfer_tab)
+        self.file_progress.pack(fill="x", padx=8, pady=4)
+        self.file_progress.set(0)
+        self.transfer_metrics = ctk.CTkLabel(transfer_tab, text="", anchor="w", justify="left")
+        self.transfer_metrics.pack(fill="x", padx=8)
+        self._last_transfer = {}
         self.activity_tabs.add("Log")
         self.activity_tabs.add("History")
         self.log_box = ctk.CTkTextbox(self.activity_tabs.tab("Log"), height=90,
@@ -265,6 +295,8 @@ class App(ctk.CTk):
         self.progress = ctk.CTkProgressBar(footer)
         self.progress.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 10))
         self.progress.set(0)
+        self.transfer_summary = ctk.CTkLabel(footer, text="", anchor="w", justify="left")
+        self.transfer_summary.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 4))
         buttons = ctk.CTkFrame(footer, fg_color="transparent")
         buttons.grid(row=0, column=1, rowspan=2, padx=8, pady=8)
         self.activity_toggle = ctk.CTkButton(buttons, text="Activity", width=75, command=self.toggle_activity)
@@ -463,6 +495,8 @@ class App(ctk.CTk):
         width = self.winfo_width()
         mode = "wide" if width >= 1160 else "split" if width >= 880 else "compact"
         self.progress_label.configure(wraplength=max(180, width - 500))
+        for label in (self.transfer_summary, self.transfer_scope, self.transfer_file, self.transfer_metrics):
+            label.configure(wraplength=max(400, width - 80))
         if mode != self._layout_mode:
             self._layout_mode = mode
             self._divider_drag = None
@@ -896,6 +930,46 @@ class App(ctk.CTk):
             self.update_topic_count()
         asyncio.run_coroutine_threadsafe(load(), self.loop)
 
+    def _render_transfer(self, details):
+        previous = self._last_transfer
+        self._last_transfer = details
+        downloaded = details.get("downloaded", previous.get("downloaded", 0))
+        skipped = details.get("skipped", previous.get("skipped", 0))
+        self._last_transfer.update(downloaded=downloaded, skipped=skipped)
+        state = details.get("state", "scanning")
+        states = {"scanning": "Scanning for matching media", "starting": "Starting file",
+                  "downloading": "Downloading", "paused": "Paused", "resuming": "Resuming",
+                  "cancelling": "Cancelling", "skipping": "Already downloaded",
+                  "retrying": "Retrying file", "failed": "Download failed",
+                  "file_complete": "File saved", "scope_complete": "Selected source complete",
+                  "scope_cancelled": "Cancelled", "scope_incomplete": "Some files failed",
+                  "complete": "Download complete", "cancelled": "Download cancelled",
+                  "incomplete": "Download incomplete"}
+        if self.downloader.cancelled and state in ("starting", "downloading", "paused", "retrying"):
+            state = "cancelling"
+        elif self.downloader.paused and state in ("starting", "downloading"):
+            state = "paused"
+        name = details.get("filename", "")
+        received = details.get("received", 0)
+        total = details.get("total")
+        speed = details.get("speed", 0) if state == "downloading" else 0
+        eta = details.get("eta") if speed > 0 else None
+        self.transfer_file.configure(text=f"{states[state]} · {name}" if name else states[state])
+        fraction = min(received / total, 1.0) if total else 0
+        if state in ("file_complete", "scope_complete", "complete"):
+            fraction = 1.0
+        self.file_progress.set(fraction)
+        if name and state not in ("skipping", "retrying", "failed"):
+            size = f"{format_bytes(received)} / {format_bytes(total)} · {fraction:.0%}" if total is not None else f"{format_bytes(received)} / size unknown"
+            metrics = f"{size}  |  Avg {format_bytes(speed)}/s  |  File ETA {format_eta(eta)}"
+        else:
+            metrics = states[state]
+        if details.get("attempt", 1) > 1:
+            metrics += f"  |  Attempt {details['attempt']}/5"
+        counts = f"{downloaded} downloaded · {skipped} skipped"
+        self.transfer_metrics.configure(text=f"{metrics}\n{counts}")
+        self.transfer_summary.configure(text=f"{metrics}  |  {counts}")
+
     def start_download(self):
         if self.busy:
             return
@@ -947,6 +1021,10 @@ class App(ctk.CTk):
         base_folder = folder
         self.log("Starting download for the selected channel/topic...")
         self.busy = True
+        if not self._activity_visible:
+            self.toggle_activity()
+        self.activity_tabs.set("Transfer")
+        self._render_transfer({"state": "scanning", "downloaded": 0, "skipped": 0})
         # Reset before scheduling so an immediate Cancel cannot be overwritten.
         self.downloader.paused = False
         self.downloader.cancelled = False
@@ -968,11 +1046,22 @@ class App(ctk.CTk):
         self.after(0, lambda: self.pause_btn.configure(state="normal"))
         self.after(0, lambda: self.cancel_btn.configure(state="normal"))
 
+        totals = {"downloaded": 0, "skipped": 0}
+
         def on_progress(count, skipped, fraction):
             self.after(0, lambda: self.progress_label.configure(
                 text=f"✅ {count} downloaded  |  ⏭ {skipped} skipped"
             ))
             self.after(0, lambda: self.progress.set(min(fraction, 1.0)))
+
+        def on_transfer(details):
+            details = details.copy()
+            if details["state"].startswith("scope_"):
+                details.update(totals)
+            else:
+                details["downloaded"] += totals["downloaded"]
+                details["skipped"] += totals["skipped"]
+            self.after(0, self._render_transfer, details)
 
         async def run_download():
             try:
@@ -983,15 +1072,20 @@ class App(ctk.CTk):
                         break
                     folder = os.path.join(base_folder, f"topic_{current_topic}") if current_topic is not None else base_folder
                     name = next((label for label, tid in topic_labels.items() if tid == current_topic), "")
+                    scope_name = (f"Topic {index + 1}/{len(topic_ids)} · {selected.name} / {name}"
+                                  if current_topic is not None else f"Channel · {selected.name}")
+                    self.after(0, lambda text=scope_name: self.transfer_scope.configure(text=text))
                     self.log(f"Scope {index + 1}/{len(topic_ids) or 1}: {name or selected.name}")
                     def done(count, skipped, destination=folder, title=name):
+                        totals["downloaded"] += count
+                        totals["skipped"] += skipped
                         save_history(selected.name + (f" / {title}" if title else ""), destination, count)
                         self.after(0, self._load_history_tab)
                         self.log(f"Scope finished: {count} downloaded, {skipped} skipped.")
                     result = await self.downloader.download(
                         selected, folder, selected_type, limit_mode, custom_limit,
                         reverse, on_progress, self.log, done, topic_id=current_topic,
-                        reset_controls=False, cutoff_date=cutoff_date)
+                        reset_controls=False, cutoff_date=cutoff_date, on_transfer=on_transfer)
                     if result != "complete":
                         status = result
                         if result == "cancelled":
@@ -999,9 +1093,11 @@ class App(ctk.CTk):
                 if status == "complete":
                     self.after(0, lambda: self.progress.set(1))
                 self.after(0, lambda: self.progress_label.configure(text=f"Download {status}"))
+                self.after(0, self._render_transfer, dict(totals, state=status))
             except Exception:
                 self.log("❌ Download failed. Check connection and local file permissions.")
                 self.after(0, lambda: self.progress_label.configure(text="Download failed"))
+                self.after(0, self._render_transfer, dict(totals, state="failed"))
             finally:
                 self.after(0, finish)
         def finish():
@@ -1026,10 +1122,13 @@ class App(ctk.CTk):
         label = "▶ Resume" if self.downloader.paused else "⏸ Pause"
         self.after(0, lambda: self.pause_btn.configure(text=label))
         self.progress_label.configure(text="Paused" if self.downloader.paused else "Downloading…")
+        state = "paused" if self.downloader.paused else "resuming"
+        self._render_transfer(dict(self._last_transfer, state=state))
         self.log("⏸ Paused." if self.downloader.paused else "▶ Resumed.")
 
     def cancel(self):
         self.downloader.cancelled = True
+        self._render_transfer(dict(self._last_transfer, state="cancelling"))
         self.log("⛔ Cancelling...")
         self.after(0, lambda: self.pause_btn.configure(state="disabled"))
         self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
