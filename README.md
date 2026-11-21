@@ -68,17 +68,27 @@ date blank for the usual download behavior. Date-filtered runs use the same
 media filters and per-topic limits, and bypass the normal sync checkpoint so
 you can revisit older dates.
 
-## Desktop layout
+## Library layout
 
-Wide windows show channels and topics on the left and download settings on the
-right. The topic list grows with the window; settings scroll independently when
-needed. Below 1040 pixels wide, use the Channels & topics / Download settings
-switch to move between panels. Your selections stay in place when resizing.
+The searchable sidebar lists your channels and groups. Click a row to select it,
+or type a title or ID and press Return to open the first matching result. IDs
+distinguish duplicate titles. The center shows the full selected title and topic
+checkboxes. Searching topics preserves hidden selections. Click a group again to
+retry topic loading.
 
-Use Hide login after signing in to free space. Activity has Log and History tabs
-and can also be hidden. On shorter screens it starts collapsed; choose Show
-activity to open it. Progress and Start / Pause / Cancel stay visible at the
-bottom of the window.
+Media filters, the file limit and download folder are on the right. Expand
+Dates, order & custom types for the calendar, download order and custom extensions.
+The current date and order remain visible in the settings summary. Preferences
+restore automatically, including settings in the collapsed section.
+
+At 1160 pixels or wider all three columns are visible. Medium windows keep the
+sidebar and switch between Topics and Settings. Below 880 pixels, the Channels,
+Topics and Settings switch shows one panel at a time. Resizing preserves inputs.
+The app follows the system's light or dark appearance.
+
+Login collapses after your channels load and can be reopened with Show login.
+Activity opens the Log and History tabs above the footer. Progress and the
+Start / Pause / Cancel controls stay available at the bottom.
 
 ## Privacy
 
