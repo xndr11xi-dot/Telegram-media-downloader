@@ -70,11 +70,17 @@ you can revisit older dates.
 
 ## Library layout
 
-The searchable sidebar lists your channels and groups. Click a row to select it,
-or type a title or ID and press Return to open the first matching result. IDs
-distinguish duplicate titles. The center shows the full selected title and topic
-checkboxes. Searching topics preserves hidden selections. Click a group again to
-retry topic loading.
+The wider channel sidebar has a typable dropdown. Open its arrow to browse full
+channel names and IDs without typing, or type a title or ID to filter and press
+Return to select the first match. The sidebar rows also remain clickable. After
+selection, the dropdown restores the full list for browsing the next channel.
+
+The narrower topics column has a typable dropdown and checkboxes. Selecting an
+item from the dropdown adds it to the checked topics, then restores the full list.
+Use checkboxes to deselect individual topics or Clear to remove all selections.
+Typing filters both the dropdown and the checkbox list while preserving hidden
+selections. IDs distinguish duplicate titles. Click a group again to retry topic
+loading.
 
 Media filters, the file limit and download folder are on the right. Expand
 Dates, order & custom types for the calendar, download order and custom extensions.

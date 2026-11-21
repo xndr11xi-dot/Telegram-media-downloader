@@ -97,8 +97,9 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(size=14, weight="bold")).grid(
                          row=0, column=0, sticky="w", padx=12, pady=(12, 6))
         self.channel_var = ctk.StringVar()
-        self.channel_search = ctk.CTkEntry(self.channels_panel, width=180,
-                                          placeholder_text="Search channels…", state="disabled")
+        self.channel_search = ctk.CTkComboBox(self.channels_panel, width=280,
+            values=[], state="disabled", command=self.choose_channel_from_dropdown)
+        self.channel_search.set("Log in to choose a channel")
         self.channel_search.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
         self.channel_search.bind("<KeyRelease>", self.filter_channels)
         self.channel_search.bind("<Return>", self.choose_filtered_channel)
@@ -119,8 +120,9 @@ class App(ctk.CTk):
         self.topic_status = ctk.CTkLabel(self.topics_panel, textvariable=self.topic_var,
                                         anchor="w", justify="left", wraplength=300)
         self.topic_status.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
-        self.topic_search = ctk.CTkEntry(self.topics_panel, placeholder_text="Search topics…",
-                                        state="disabled")
+        self.topic_search = ctk.CTkComboBox(self.topics_panel, values=[],
+            state="disabled", command=self.choose_topic_from_dropdown)
+        self.topic_search.set("")
         self.topic_search.grid(row=2, column=0, sticky="ew", padx=18, pady=4)
         actions = ctk.CTkFrame(self.topics_panel, fg_color="transparent")
         actions.grid(row=3, column=0, sticky="ew", padx=14, pady=8)
@@ -410,7 +412,9 @@ class App(ctk.CTk):
         width = self.winfo_width()
         mode = "wide" if width >= 1160 else "split" if width >= 880 else "compact"
         self.progress_label.configure(wraplength=max(180, width - 500))
-        topic_width = width - 680 if mode == "wide" else width - 320 if mode == "split" else width - 110
+        topic_width = 260 if mode == "wide" else width - 420 if mode == "split" else width - 110
+        channel_width = width - 740 if mode == "wide" else 290 if mode == "split" else width - 110
+        self.channel_hint.configure(wraplength=max(260, channel_width))
         for label in (self.source_title, self.topic_status, self.topic_empty, self.topic_count):
             label.configure(wraplength=max(240, topic_width))
         if mode == self._layout_mode:
@@ -421,8 +425,8 @@ class App(ctk.CTk):
         for panel in (self.channels_panel, self.topics_panel, self.settings_panel):
             panel.grid_remove()
         if mode == "wide":
-            self.workspace.grid_columnconfigure(0, minsize=235)
-            self.workspace.grid_columnconfigure(1, weight=1, minsize=300)
+            self.workspace.grid_columnconfigure(0, weight=1, minsize=340)
+            self.workspace.grid_columnconfigure(1, minsize=300)
             self.workspace.grid_columnconfigure(2, minsize=355)
             self.pane_switch.grid_remove()
             for column, panel in enumerate((self.channels_panel, self.topics_panel, self.settings_panel)):
@@ -433,7 +437,7 @@ class App(ctk.CTk):
             self.pane_switch.configure(values=panes)
             self.pane_switch.set(previous if previous in panes else "Topics")
             if mode == "split":
-                self.workspace.grid_columnconfigure(0, minsize=235)
+                self.workspace.grid_columnconfigure(0, minsize=340)
                 self.workspace.grid_columnconfigure(1, weight=1)
                 self.channels_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
             else:
@@ -552,7 +556,7 @@ class App(ctk.CTk):
             button.destroy()
         self.channel_buttons = {}
         for channel in channels:
-            title = channel.name if len(channel.name) <= 24 else channel.name[:23] + "…"
+            title = channel.name if len(channel.name) <= 40 else channel.name[:39] + "…"
             kind = "Forum" if getattr(channel.entity, "forum", False) else "Channel / group"
             button = ctk.CTkButton(self.channel_list, text=f"{title}\n{kind} · {channel.id}",
                 anchor="w", height=56, fg_color="transparent", text_color=("#26384c", "#e0eafa"),
@@ -560,14 +564,14 @@ class App(ctk.CTk):
                 command=lambda cid=channel.id: self.choose_channel(cid))
             button.pack(fill="x", padx=4, pady=3)
             self.channel_buttons[channel.id] = button
-        self.channel_search.configure(state="normal" if channels else "disabled")
+        self.channel_search.configure(state="normal" if channels else "disabled",
+            values=[f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels])
         if channels:
             self.choose_channel(channels[0].id)
         else:
             self.topic_var.set("No channels or groups available for this account.")
             self.topic_empty.configure(text=self.topic_var.get())
             self.progress_label.configure(text="No channels or groups available")
-        self.filter_channels()
         if self._account_visible:
             self.toggle_account()
 
@@ -577,41 +581,75 @@ class App(ctk.CTk):
         selected = next((c for c in self.channels if c.id == channel_id), None)
         if selected is None:
             return
-        self.channel_var.set(f"{'📢' if selected.is_channel else '👥'} {selected.name} [{selected.id}]")
+        label = f"{'📢' if selected.is_channel else '👥'} {selected.name} [{selected.id}]"
+        self.channel_var.set(label)
+        self.channel_search.set(label)
         self.select_channel()
+        self.channel_search.configure(values=[f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in self.channels])
+        for button in self.channel_buttons.values():
+            button.pack(fill="x", padx=4, pady=3)
+        self.channel_hint.configure(text=f"{len(self.channels)} channels / groups")
         if self._layout_mode != "wide":
             self.pane_switch.set("Topics")
             self.show_workspace_pane("Topics")
+
+    def choose_channel_from_dropdown(self, label):
+        selected = next((c for c in self.channels
+            if f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" == label), None)
+        if selected is not None:
+            self.choose_channel(selected.id)
+
+    def choose_topic_from_dropdown(self, label):
+        if self.busy:
+            return
+        if label in self.topic_checks:
+            self.topic_checks[label][0].set(True)
+        self.topic_search.set("")
+        self.filter_topics()
+
+    def choose_filtered_topic(self, _event=None):
+        query = self.topic_search.get().strip().casefold()
+        label = next((label for label in self.topics if query in label.casefold()), None)
+        if label is not None:
+            self.choose_topic_from_dropdown(label)
 
     def choose_filtered_channel(self, _event=None):
         if self.busy:
             return
         query = self.channel_search.get().strip().casefold()
-        selected = next((c for c in self.channels if query in c.name.casefold() or query in str(c.id)), None)
+        selected = next((c for c in self.channels if query in f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]".casefold()), None)
         if selected is not None:
             self.choose_channel(selected.id)
 
     def filter_channels(self, _event=None):
-        if self.busy:
+        if self.busy or (_event is not None and _event.keysym in ("Return", "Up", "Down", "Escape")):
             return
         query = self.channel_search.get().strip().casefold()
         visible = 0
+        matches = []
         for channel in self.channels:
             button = self.channel_buttons[channel.id]
             button.pack_forget()
-            if query in channel.name.casefold() or query in str(channel.id):
+            label = f"{'📢' if channel.is_channel else '👥'} {channel.name} [{channel.id}]"
+            if query in label.casefold():
                 button.pack(fill="x", padx=4, pady=3)
                 visible += 1
+                matches.append(label)
+        self.channel_search.configure(values=matches)
         text = f"{visible} matching channels / groups" if query else f"{visible} channels / groups"
         self.channel_hint.configure(text=text if self.channels else "No channels or groups available.")
 
     def filter_topics(self, _event=None):
+        if self.busy or (_event is not None and _event.keysym in ("Return", "Up", "Down", "Escape")):
+            return
         query = self.topic_search.get().strip().casefold()
         for label, (_var, check) in self.topic_checks.items():
             check.pack_forget()
             if query in label.casefold():
                 check.pack(anchor="w", fill="x", padx=6, pady=4)
-        matches = sum(query in label.casefold() for label in self.topic_checks)
+        values = [label for label in self.topics if query in label.casefold()]
+        self.topic_search.configure(values=values)
+        matches = len(values)
         if self.topics and not matches:
             self.topic_empty.configure(text="No topics match your search.")
             self.topic_empty.pack(anchor="w", padx=6, pady=16)
@@ -651,7 +689,8 @@ class App(ctk.CTk):
         for _var, check in self.topic_checks.values():
             check.destroy()
         self.topic_checks = {}
-        self.topic_search.delete(0, "end")
+        self.topic_search.set("")
+        self.topic_search.configure(values=[])
         self.topic_count.configure(text="No topics selected")
         selected = self.selected_channel()
         self.source_title.configure(text=f"{selected.name} [{selected.id}]")
@@ -693,7 +732,7 @@ class App(ctk.CTk):
                 self.progress_label.configure(text="No topics available in this group")
                 return
             self.topic_empty.pack_forget()
-            self.topic_search.configure(state="normal")
+            self.topic_search.configure(state="normal", values=list(self.topics))
             self.select_topics_btn.configure(state="normal")
             self.clear_topics_btn.configure(state="normal")
             self.topic_var.set("Choose one or more topics below.")
