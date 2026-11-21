@@ -5,21 +5,25 @@ import threading
 import os
 import calendar
 from datetime import date, datetime, timezone
-from local_data import read_json, write_json
+from local_data import (
+    read_json, write_json, load_connection_details, save_connection_details,
+    forget_connection_details,
+)
 from downloader import TelegramDownloader, group_folder
 from history import load_history, save_history
 
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Telegram Media Downloader")
-        self.geometry(f"{min(1180, self.winfo_screenwidth() - 80)}x{min(900, self.winfo_screenheight() - 80)}")
+        self.geometry(f"{min(1280, self.winfo_screenwidth() - 80)}x{min(900, self.winfo_screenheight() - 80)}")
         self.resizable(True, True)
         self.minsize(700, min(700, self.winfo_screenheight() - 80))
         self.topic_checks = {}
+        self.channel_buttons = {}
         self.media_checks = {}
         self.downloader = None
         self.loop = None
@@ -27,9 +31,21 @@ class App(ctk.CTk):
         self.topics = {}
         self.topic_generation = 0
         self.busy = False
+        self._pane_weights = [1.0, 1.0, 1.0]
+        self._split_weights = [1.0, 1.0]
+        self._divider_drag = None
+        self._preferences_job = None
+        self._restoring = True
+        self._login_credentials = None
         self._build()
         self._preferences_job = None
         self._restore_preferences()
+        self._update_limit_controls()
+        self._show_custom_options()
+        self._update_settings_summary()
+        self._restore_connection_details()
+        self._restoring = False
+        self._refresh_layout()
         for variable in [self.folder_path, self.limit_mode, self.reverse, self.all_media, *self.media_checks.values()]:
             variable.trace_add("write", self._queue_preferences)
         for entry in (self.custom_ext, self.custom_limit, self.cutoff_date):
@@ -39,18 +55,23 @@ class App(ctk.CTk):
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
+        surface = ("#ffffff", "#1b222c")
+        sidebar = ("#f1f4f8", "#202a36")
 
-        # Collapsible account area leaves the workspace available after login.
-        account = ctk.CTkFrame(self)
+        account = ctk.CTkFrame(self, fg_color=surface)
         account.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 6))
         account.grid_columnconfigure(0, weight=1)
         heading = ctk.CTkFrame(account, fg_color="transparent")
-        heading.grid(row=0, column=0, sticky="ew", padx=12, pady=6)
-        ctk.CTkLabel(heading, text="Telegram Media Downloader", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
-        self.account_toggle = ctk.CTkButton(heading, text="Hide login", width=100, command=self.toggle_account)
+        heading.grid(row=0, column=0, sticky="ew", padx=14, pady=10)
+        ctk.CTkLabel(heading, text="Telegram Media Downloader",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        self.account_toggle = ctk.CTkButton(heading, text="Hide login", width=100,
+                                          command=self.toggle_account)
         self.account_toggle.pack(side="right")
+        ctk.CTkButton(heading, text="Reset layout", width=100,
+                      command=self.reset_layout).pack(side="right", padx=8)
         self.account_fields = ctk.CTkFrame(account, fg_color="transparent")
-        self.account_fields.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.account_fields.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
         for column, (label, attr, placeholder) in enumerate([
             ("API ID", "api_id", "Your API ID"),
             ("API hash", "api_hash", "Your API hash"),
@@ -70,67 +91,97 @@ class App(ctk.CTk):
         ctk.CTkLabel(login_row, text="Telegram code").grid(row=0, column=0, padx=(0, 8))
         self.otp = ctk.CTkEntry(login_row, placeholder_text="Check Telegram app", show="*")
         self.otp.grid(row=0, column=1, sticky="ew")
-        self.otp_btn = ctk.CTkButton(login_row, text="Submit code", width=110, state="disabled", command=self.submit_otp)
+        self.otp_btn = ctk.CTkButton(login_row, text="Submit code", width=110,
+                                   state="disabled", command=self.submit_otp)
         self.otp_btn.grid(row=0, column=2, padx=8)
         self.login_btn = ctk.CTkButton(login_row, text="Log in", width=100, command=self.login)
         self.login_btn.grid(row=0, column=3)
+        self.remember_connection = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(self.account_fields, text="Remember connection details on this Mac",
+            variable=self.remember_connection, command=self._connection_preference_changed).grid(row=2, column=0, columnspan=2,
+                sticky="w", padx=4, pady=(10, 0))
+        ctk.CTkButton(self.account_fields, text="Forget saved details", width=150,
+            command=self.forget_saved_connection).grid(row=2, column=2, sticky="e", padx=4, pady=(10, 0))
+        self.connection_status = ctk.CTkLabel(self.account_fields, text="", anchor="w")
+        self.connection_status.grid(row=3, column=0, columnspan=3, sticky="ew", padx=4)
         self._account_visible = True
 
-        # Wide windows show two work areas. Narrow windows switch between them.
         self.workspace = ctk.CTkFrame(self, fg_color="transparent")
         self.workspace.grid(row=1, column=0, sticky="nsew", padx=16, pady=6)
         self.workspace.grid_rowconfigure(1, weight=1)
-        self.workspace.grid_columnconfigure(0, weight=1, uniform="workspace")
-        self.workspace.grid_columnconfigure(1, weight=1, uniform="workspace")
+        self.dividers = []
+        for index in range(2):
+            divider = ctk.CTkFrame(self.workspace, width=8, corner_radius=0,
+                fg_color=("#d4dde7", "#3c495a"), cursor="sb_h_double_arrow")
+            divider.bind("<ButtonPress-1>", lambda event, i=index: self._begin_pane_resize(i, event))
+            divider.bind("<B1-Motion>", self._resize_panes)
+            divider.bind("<ButtonRelease-1>", self._end_pane_resize)
+            self.dividers.append(divider)
         self.pane_switch = ctk.CTkSegmentedButton(self.workspace,
-            values=["Channels & topics", "Download settings"], command=self.show_workspace_pane)
-        self.pane_switch.set("Channels & topics")
-        self.source_panel = ctk.CTkFrame(self.workspace)
-        self.source_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        self.settings_panel = ctk.CTkScrollableFrame(self.workspace)
-        self.settings_panel.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
-        self._compact_layout = None
-        self.bind("<Configure>", self._on_window_resize)
-
-        source = self.source_panel
-        source.grid_columnconfigure(0, weight=1)
-        source.grid_rowconfigure(6, weight=1)
-        ctk.CTkLabel(source, text="1  Choose channels & topics", font=ctk.CTkFont(size=15, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(10, 4))
+            values=["Channels", "Topics", "Settings"], command=self.show_workspace_pane)
+        self.pane_switch.set("Topics")
+        self.channels_panel = ctk.CTkFrame(self.workspace, fg_color=sidebar)
+        self.channels_panel.grid_propagate(False)
+        self.channels_panel.grid_columnconfigure(0, weight=1)
+        self.channels_panel.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(self.channels_panel, text="Channels & groups",
+                     font=ctk.CTkFont(size=14, weight="bold")).grid(
+                         row=0, column=0, sticky="w", padx=12, pady=(12, 6))
         self.channel_var = ctk.StringVar()
-        self.channel_search = ctk.CTkEntry(source, placeholder_text="Search channels or groups…")
-        self.channel_search.grid(row=1, column=0, sticky="ew", padx=14, pady=4)
+        self.channel_search = ctk.CTkComboBox(self.channels_panel, width=200,
+            values=[], state="disabled", command=self.choose_channel_from_dropdown)
+        self.channel_search.set("Log in to choose a channel")
+        self.channel_search.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
         self.channel_search.bind("<KeyRelease>", self.filter_channels)
         self.channel_search.bind("<Return>", self.choose_filtered_channel)
-        self.channel_menu = ctk.CTkOptionMenu(source, variable=self.channel_var,
-            values=["Log in first…"], state="disabled", width=200, command=self.select_channel)
-        self.channel_menu.grid(row=2, column=0, sticky="ew", padx=14, pady=4)
-        self.channel_hint = ctk.CTkLabel(source, text="Log in to load channels and groups.", anchor="w", wraplength=400)
-        self.channel_hint.grid(row=3, column=0, sticky="ew", padx=14, pady=2)
-        self.topic_search = ctk.CTkEntry(source, placeholder_text="Search topics…")
-        self.topic_search.grid(row=4, column=0, sticky="ew", padx=14, pady=(8, 4))
-        self.topic_search.bind("<KeyRelease>", self.filter_topics)
-        actions = ctk.CTkFrame(source, fg_color="transparent")
-        actions.grid(row=5, column=0, sticky="ew", padx=10, pady=4)
-        ctk.CTkButton(actions, text="Select visible", width=125, command=lambda: self.select_topics(True)).pack(side="left", padx=4)
-        ctk.CTkButton(actions, text="Clear selection", width=125, command=lambda: self.select_topics(False)).pack(side="left", padx=4)
-        self.topic_list = ctk.CTkScrollableFrame(source, height=60)
-        self.topic_list.grid(row=6, column=0, sticky="nsew", padx=14, pady=4)
-        self.topic_count = ctk.CTkLabel(source, text="No topics selected", anchor="w", wraplength=400)
-        self.topic_count.grid(row=7, column=0, sticky="ew", padx=14)
-        self.topic_var = ctk.StringVar(value="Log in and choose a channel or group.")
-        # Retained as controller state for topic loading; the visible UI is checkboxes.
-        self.topic_menu = ctk.CTkOptionMenu(source, variable=self.topic_var, values=["No topic required"], state="disabled", width=200)
-        self.topic_status = ctk.CTkLabel(source, textvariable=self.topic_var, anchor="w", wraplength=400)
-        self.topic_status.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self.channel_list = ctk.CTkScrollableFrame(self.channels_panel, width=180,
+                                                  fg_color="transparent")
+        self.channel_list.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+        self.channel_hint = ctk.CTkLabel(self.channels_panel,
+            text="Log in to load your library.", wraplength=185, justify="left", anchor="w")
+        self.channel_hint.grid(row=3, column=0, sticky="ew", padx=12, pady=(4, 12))
 
+        self.topics_panel = ctk.CTkFrame(self.workspace, fg_color=surface)
+        self.topics_panel.grid_propagate(False)
+        self.topics_panel.grid_columnconfigure(0, weight=1)
+        self.topics_panel.grid_rowconfigure(4, weight=1)
+        self.source_title = ctk.CTkLabel(self.topics_panel, text="Your library", anchor="w",
+                                        font=ctk.CTkFont(size=20, weight="bold"), wraplength=300)
+        self.source_title.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
+        self.topic_var = ctk.StringVar(value="Choose a channel or group to get started.")
+        self.topic_status = ctk.CTkLabel(self.topics_panel, textvariable=self.topic_var,
+                                        anchor="w", justify="left", wraplength=300)
+        self.topic_status.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
+        self.topic_search = ctk.CTkComboBox(self.topics_panel, values=[],
+            state="disabled", command=self.choose_topic_from_dropdown)
+        self.topic_search.set("")
+        self.topic_search.grid(row=2, column=0, sticky="ew", padx=18, pady=4)
+        self.topic_search.bind("<KeyRelease>", self.filter_topics)
+        self.topic_search.bind("<Return>", self.choose_filtered_topic)
+        actions = ctk.CTkFrame(self.topics_panel, fg_color="transparent")
+        actions.grid(row=3, column=0, sticky="ew", padx=14, pady=8)
+        self.select_topics_btn = ctk.CTkButton(actions, text="Select visible", width=115,
+            state="disabled", command=lambda: self.select_topics(True))
+        self.select_topics_btn.pack(side="left", padx=4)
+        self.clear_topics_btn = ctk.CTkButton(actions, text="Clear", width=70,
+            state="disabled", command=lambda: self.select_topics(False))
+        self.clear_topics_btn.pack(side="left", padx=4)
+        self.topic_list = ctk.CTkScrollableFrame(self.topics_panel, height=60,
+                                                fg_color="transparent")
+        self.topic_list.grid(row=4, column=0, sticky="nsew", padx=12, pady=4)
+        self.topic_empty = ctk.CTkLabel(self.topic_list, text="Your topics will appear here.",
+                                       wraplength=280, justify="left")
+        self.topic_empty.pack(anchor="w", padx=6, pady=16)
+        self.topic_count = ctk.CTkLabel(self.topics_panel, text="No topics selected", anchor="w",
+                                       wraplength=300)
+        self.topic_count.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 12))
+
+        self.settings_panel = ctk.CTkScrollableFrame(self.workspace, width=300, fg_color=surface)
         settings = self.settings_panel
-        ctk.CTkLabel(settings, text="2  Configure downloads", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=10, pady=(6, 4))
-        type_frame = ctk.CTkFrame(settings)
-        type_frame.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(type_frame, text="Media types · combine any selections", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=6)
-        self.media_type = ctk.StringVar(value="all")
-        quick_row = ctk.CTkFrame(type_frame, fg_color="transparent")
+        ctk.CTkLabel(settings, text="Download settings", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=12, pady=(8, 4))
+        ctk.CTkLabel(settings, text="Media types").pack(anchor="w", padx=12, pady=(8, 0))
+        quick_row = ctk.CTkFrame(settings, fg_color="transparent")
         quick_row.pack(fill="x", padx=8)
         for column in range(3):
             quick_row.grid_columnconfigure(column, weight=1)
@@ -141,87 +192,125 @@ class App(ctk.CTk):
         ]):
             var = ctk.BooleanVar(value=value in ("photo", "video"))
             self.media_checks[value] = var
-            ctk.CTkCheckBox(quick_row, text=label, width=80, variable=var).grid(
+            ctk.CTkCheckBox(quick_row, text=label, width=75, variable=var,
+                            command=self._show_custom_options if value == "custom" else None).grid(
                 row=index//3, column=index%3, sticky="w", padx=4, pady=5)
         self.all_media = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(type_frame, text="All media (overrides selections)", variable=self.all_media).pack(anchor="w", padx=12, pady=6)
-        self.custom_ext = ctk.CTkEntry(type_frame, placeholder_text="Custom extensions: .pdf,.csv")
-        self.custom_ext.pack(fill="x", padx=12, pady=(0, 10))
-        self.custom_ext.bind("<Key>", lambda e: self.media_checks["custom"].set(True))
-
-        limit_frame = ctk.CTkFrame(settings)
-        limit_frame.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(limit_frame, text="New files per topic / channel", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=6)
+        ctk.CTkCheckBox(settings, text="All media types", variable=self.all_media).pack(
+            anchor="w", padx=12, pady=(6, 12))
+        ctk.CTkLabel(settings, text="New files per topic / channel").pack(anchor="w", padx=12)
         self.limit_mode = ctk.StringVar(value="all")
-        limit_row = ctk.CTkFrame(limit_frame, fg_color="transparent")
-        limit_row.pack(fill="x", padx=8)
-        for column in range(3):
-            limit_row.grid_columnconfigure(column, weight=1)
-        for index, (label, value) in enumerate([("Last 20", "20"), ("Last 50", "50"), ("Last 100", "100"), ("All", "all"), ("Custom", "custom")]):
-            ctk.CTkRadioButton(limit_row, text=label, width=85, variable=self.limit_mode, value=value).grid(
-                row=index//3, column=index%3, sticky="w", padx=4, pady=4)
-        self.custom_limit = ctk.CTkEntry(limit_frame, placeholder_text="Custom number, e.g. 23")
-        self.custom_limit.pack(fill="x", padx=12, pady=(4, 10))
+        self.limit_menu = ctk.CTkOptionMenu(settings,
+            values=["All new files", "Last 20", "Last 50", "Last 100", "Custom number"],
+            command=self._choose_limit)
+        self.limit_menu.pack(fill="x", padx=12, pady=(2, 8))
+        self.custom_limit = ctk.CTkEntry(settings, placeholder_text="Number of files, e.g. 23")
         self.custom_limit.bind("<Key>", lambda e: self.limit_mode.set("custom"))
-        order = ctk.CTkFrame(settings)
-        order.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(order, text="Download order", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(6, 0))
+        self.limit_mode.trace_add("write", lambda *_args: self._update_limit_controls())
+        ctk.CTkLabel(settings, text="Download folder").pack(anchor="w", padx=12, pady=(6, 0))
+        folder_row = ctk.CTkFrame(settings, fg_color="transparent")
+        folder_row.pack(fill="x", padx=12, pady=(2, 12))
+        self.folder_path = ctk.StringVar(value=os.path.expanduser("~/Downloads/Telegram"))
+        ctk.CTkEntry(folder_row, width=120, textvariable=self.folder_path).pack(
+            side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(folder_row, text="Browse", width=70, command=self.browse).pack(side="right")
+        self.advanced_toggle = ctk.CTkButton(settings, text="Dates, order & custom types ▸",
+            fg_color="transparent", text_color=("#26384c", "#d8e6f5"),
+            command=self.toggle_advanced)
+        self.advanced_toggle.pack(fill="x", padx=8, pady=(4, 0))
+        self.settings_summary = ctk.CTkLabel(settings, text="Newest first · All dates",
+                                           anchor="w", justify="left", wraplength=285)
+        self.settings_summary.pack(fill="x", padx=12, pady=(4, 8))
+        self.advanced_fields = ctk.CTkFrame(settings, fg_color="transparent")
+        self._advanced_visible = False
+        ctk.CTkLabel(self.advanced_fields, text="Download order").pack(anchor="w", padx=4)
         self.reverse = ctk.BooleanVar(value=False)
         for label, value in [("Newest → Oldest", False), ("Oldest → Newest", True)]:
-            ctk.CTkRadioButton(order, text=label, variable=self.reverse, value=value).pack(anchor="w", padx=12, pady=4)
-        ctk.CTkLabel(order, text="Optional message date (UTC)").pack(anchor="w", padx=12)
-        date_row = ctk.CTkFrame(order, fg_color="transparent")
-        date_row.pack(fill="x", padx=12, pady=(2, 4))
-        self.cutoff_date = ctk.CTkEntry(date_row, placeholder_text="YYYY-MM-DD")
+            ctk.CTkRadioButton(self.advanced_fields, text=label, variable=self.reverse, value=value).pack(
+                anchor="w", padx=4, pady=4)
+        ctk.CTkLabel(self.advanced_fields, text="Message date (UTC)").pack(anchor="w", padx=4, pady=(8, 0))
+        date_row = ctk.CTkFrame(self.advanced_fields, fg_color="transparent")
+        date_row.pack(fill="x", padx=4, pady=(2, 4))
+        self.cutoff_date = ctk.CTkEntry(date_row, width=120, placeholder_text="YYYY-MM-DD")
         self.cutoff_date.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkButton(date_row, text="Calendar", width=86, command=self.open_date_picker).pack(side="right")
-        ctk.CTkLabel(order, text="Newest first: on or before · Oldest first: on or after",
-                     wraplength=340, justify="left").pack(anchor="w", padx=12, pady=(0, 6))
-        folder_frame = ctk.CTkFrame(settings)
-        folder_frame.pack(fill="x", padx=4, pady=(4, 8))
-        ctk.CTkLabel(folder_frame, text="Save to", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=12, pady=(6, 0))
-        folder_row = ctk.CTkFrame(folder_frame, fg_color="transparent")
-        folder_row.pack(fill="x", padx=12, pady=(4, 10))
-        self.folder_path = ctk.StringVar(value=os.path.expanduser("~/Downloads/Telegram"))
-        ctk.CTkEntry(folder_row, textvariable=self.folder_path).pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ctk.CTkButton(folder_row, text="Browse", width=80, command=self.browse).pack(side="right")
+        ctk.CTkButton(date_row, text="Calendar", width=80, command=self.open_date_picker).pack(side="right")
+        ctk.CTkLabel(self.advanced_fields,
+            text="Newest first: on or before.\nOldest first: on or after.", justify="left").pack(anchor="w", padx=4)
+        ctk.CTkLabel(self.advanced_fields, text="Custom extensions").pack(anchor="w", padx=4, pady=(8, 0))
+        self.custom_ext = ctk.CTkEntry(self.advanced_fields, placeholder_text=".pdf,.csv")
+        self.custom_ext.pack(fill="x", padx=4, pady=(2, 8))
+        self.custom_ext.bind("<Key>", lambda e: self.media_checks["custom"].set(True))
+        self._update_limit_controls()
 
-        # Activity is outside the settings scroll, as are all download controls.
-        self.activity = ctk.CTkFrame(self)
+        self.activity = ctk.CTkFrame(self, fg_color=surface)
         self.activity.grid(row=2, column=0, sticky="ew", padx=16, pady=4)
-        activity_heading = ctk.CTkFrame(self.activity, fg_color="transparent")
-        activity_heading.pack(fill="x", padx=10, pady=4)
-        ctk.CTkLabel(activity_heading, text="Activity", font=ctk.CTkFont(weight="bold")).pack(side="left")
-        self.activity_toggle = ctk.CTkButton(activity_heading, text="Hide activity", width=110, command=self.toggle_activity)
-        self.activity_toggle.pack(side="right")
-        self.activity_tabs = ctk.CTkTabview(self.activity, height=130)
-        self.activity_tabs.pack(fill="x", padx=8, pady=(0, 6))
+        self.activity_tabs = ctk.CTkTabview(self.activity, height=150)
+        self.activity_tabs.pack(fill="x", padx=8, pady=6)
         self.activity_tabs.add("Log")
         self.activity_tabs.add("History")
-        self.log_box = ctk.CTkTextbox(self.activity_tabs.tab("Log"), height=70, font=("Courier", 11), state="disabled")
+        self.log_box = ctk.CTkTextbox(self.activity_tabs.tab("Log"), height=90,
+                                     font=("Courier", 11), state="disabled")
         self.log_box.pack(fill="both", expand=True)
-        self.history_box = ctk.CTkTextbox(self.activity_tabs.tab("History"), height=70, font=("Courier", 11))
+        self.history_box = ctk.CTkTextbox(self.activity_tabs.tab("History"), height=90,
+                                         font=("Courier", 11))
         self.history_box.pack(fill="both", expand=True)
-        self._activity_visible = True
+        self._activity_visible = False
+        self.activity.grid_remove()
         self._load_history_tab()
-        footer = ctk.CTkFrame(self)
+        footer = ctk.CTkFrame(self, fg_color=surface)
         footer.grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 12))
         footer.grid_columnconfigure(0, weight=1)
-        self.progress_label = ctk.CTkLabel(footer, text="Ready · log in to choose a source", anchor="w")
+        self.progress_label = ctk.CTkLabel(footer, text="Ready · Log in to load your library", anchor="w")
         self.progress_label.grid(row=0, column=0, sticky="ew", padx=12, pady=(6, 0))
         self.progress = ctk.CTkProgressBar(footer)
         self.progress.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 10))
         self.progress.set(0)
         buttons = ctk.CTkFrame(footer, fg_color="transparent")
         buttons.grid(row=0, column=1, rowspan=2, padx=8, pady=8)
-        self.start_btn = ctk.CTkButton(buttons, text="Start", width=88, state="disabled", command=self.start_download)
-        self.pause_btn = ctk.CTkButton(buttons, text="Pause", width=88, state="disabled", command=self.pause)
-        self.cancel_btn = ctk.CTkButton(buttons, text="Cancel", width=88, state="disabled", fg_color="#963b42", command=self.cancel)
-        for button in (self.start_btn, self.pause_btn, self.cancel_btn):
+        self.activity_toggle = ctk.CTkButton(buttons, text="Activity", width=75, command=self.toggle_activity)
+        self.start_btn = ctk.CTkButton(buttons, text="Start download", width=125,
+                                     state="disabled", command=self.start_download)
+        self.pause_btn = ctk.CTkButton(buttons, text="Pause", width=75, state="disabled", command=self.pause)
+        self.cancel_btn = ctk.CTkButton(buttons, text="Cancel", width=75, state="disabled", command=self.cancel)
+        for button in (self.activity_toggle, self.pause_btn, self.cancel_btn, self.start_btn):
             button.pack(side="left", padx=4)
-        if self.winfo_screenheight() < 900:
-            self.toggle_activity()
+        self._layout_mode = None
+        self.bind("<Configure>", self._on_window_resize)
         self.after_idle(self._refresh_layout)
+
+    def _choose_limit(self, label):
+        modes = {"All new files": "all", "Last 20": "20", "Last 50": "50",
+                 "Last 100": "100", "Custom number": "custom"}
+        self.limit_mode.set(modes[label])
+
+    def _update_limit_controls(self):
+        labels = {"all": "All new files", "20": "Last 20", "50": "Last 50",
+                  "100": "Last 100", "custom": "Custom number"}
+        self.limit_menu.set(labels[self.limit_mode.get()])
+        if self.limit_mode.get() == "custom":
+            self.custom_limit.pack(fill="x", padx=12, pady=(0, 6), after=self.limit_menu)
+        else:
+            self.custom_limit.pack_forget()
+
+    def toggle_advanced(self):
+        self._advanced_visible = not self._advanced_visible
+        if self._advanced_visible:
+            self.advanced_fields.pack(fill="x", padx=8, pady=(0, 10))
+        else:
+            self.advanced_fields.pack_forget()
+        arrow = "▾" if self._advanced_visible else "▸"
+        self.advanced_toggle.configure(text=f"Dates, order & custom types {arrow}")
+
+    def _show_custom_options(self):
+        if self.media_checks["custom"].get() and not self._advanced_visible:
+            self.toggle_advanced()
+
+    def _update_settings_summary(self):
+        order = "Oldest first" if self.reverse.get() else "Newest first"
+        cutoff = self.cutoff_date.get().strip()
+        relation = "On or after" if self.reverse.get() else "On or before"
+        dates = f"{relation} {cutoff} (UTC)" if cutoff else "All dates"
+        self.settings_summary.configure(text=f"{order} · {dates}")
 
     def _preferences_path(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "preferences.local.json")
@@ -231,6 +320,18 @@ class App(ctk.CTk):
             saved = read_json(self._preferences_path(), {})
         except (OSError, UnicodeError):
             saved = {}
+        for key, attr, count in (("pane_weights", "_pane_weights", 3),
+                                 ("split_weights", "_split_weights", 2)):
+            weights = saved.get(key)
+            if (isinstance(weights, list) and len(weights) == count
+                    and all(type(value) in (int, float) and 0 <= value <= 10000 for value in weights)
+                    and sum(weights) > 0):
+                setattr(self, attr, weights)
+        size = saved.get("window_size")
+        if isinstance(size, list) and len(size) == 2 and all(type(n) is int and n > 0 for n in size):
+            width = min(max(700, size[0]), self.winfo_screenwidth() - 80)
+            height = min(max(600, size[1]), self.winfo_screenheight() - 80)
+            self.geometry(f"{width}x{height}")
         for name in ("folder_path", "custom_ext", "custom_limit", "cutoff_date"):
             value = saved.get(name)
             if isinstance(value, str) and len(value) <= 4096:
@@ -243,7 +344,7 @@ class App(ctk.CTk):
         mode = saved.get("limit_mode")
         if mode in ("all", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
-        for name in ("reverse", "all_media"):
+        for name in ("reverse", "all_media", "remember_connection"):
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
         media = saved.get("media", {})
@@ -253,6 +354,7 @@ class App(ctk.CTk):
                     variable.set(media[name])
 
     def _queue_preferences(self, *_args):
+        self._update_settings_summary()
         if self._preferences_job is not None:
             self.after_cancel(self._preferences_job)
         self._preferences_job = self.after(400, self._save_preferences)
@@ -261,8 +363,11 @@ class App(ctk.CTk):
         self._preferences_job = None
         saved = {name: getattr(self, name).get() for name in (
             "folder_path", "custom_ext", "custom_limit", "cutoff_date",
-            "limit_mode", "reverse", "all_media")}
+            "limit_mode", "reverse", "all_media", "remember_connection")}
         saved["media"] = {name: variable.get() for name, variable in self.media_checks.items()}
+        saved["pane_weights"] = self._pane_weights
+        saved["split_weights"] = self._split_weights
+        saved["window_size"] = [self.winfo_width(), self.winfo_height()]
         try:
             write_json(self._preferences_path(), saved)
         except OSError:
@@ -343,42 +448,165 @@ class App(ctk.CTk):
     def toggle_activity(self):
         self._activity_visible = not self._activity_visible
         if self._activity_visible:
-            self.activity_tabs.pack(fill="x", padx=8, pady=(0, 6))
+            self.activity.grid()
         else:
-            self.activity_tabs.pack_forget()
-        self.activity_toggle.configure(text="Hide activity" if self._activity_visible else "Show activity")
+            self.activity.grid_remove()
+        self.activity_toggle.configure(text="Hide activity" if self._activity_visible else "Activity")
 
     def _on_window_resize(self, event):
         if event.widget is self:
             self._refresh_layout()
+            if not self._restoring:
+                self._queue_preferences()
 
     def _refresh_layout(self):
-        compact = self.winfo_width() < 1040
-        width = self.winfo_width() - 76 if compact else (self.winfo_width() - 100) // 2
-        for label in (self.channel_hint, self.topic_count, self.topic_status):
-            label.configure(wraplength=max(260, width))
-        if compact == self._compact_layout:
-            return
-        self._compact_layout = compact
-        if compact:
-            self.workspace.grid_columnconfigure(0, weight=1, uniform="")
-            self.workspace.grid_columnconfigure(1, weight=0, uniform="")
-            self.pane_switch.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-            self.show_workspace_pane(self.pane_switch.get())
+        width = self.winfo_width()
+        mode = "wide" if width >= 1160 else "split" if width >= 880 else "compact"
+        self.progress_label.configure(wraplength=max(180, width - 500))
+        if mode != self._layout_mode:
+            self._layout_mode = mode
+            self._divider_drag = None
+            for panel in (self.channels_panel, self.topics_panel, self.settings_panel, *self.dividers):
+                panel.grid_remove()
+            if mode == "wide":
+                self.pane_switch.grid_remove()
+                for column, panel in zip((0, 2, 4), (self.channels_panel, self.topics_panel, self.settings_panel)):
+                    panel.grid(row=1, column=column, sticky="nsew")
+                for column, divider in zip((1, 3), self.dividers):
+                    divider.grid(row=1, column=column, sticky="ns", padx=2)
+            else:
+                panes = ["Topics", "Settings"] if mode == "split" else ["Channels", "Topics", "Settings"]
+                previous = self.pane_switch.get()
+                self.pane_switch.configure(values=panes)
+                self.pane_switch.set(previous if previous in panes else "Topics")
+                if mode == "split":
+                    self.channels_panel.grid(row=1, column=0, sticky="nsew")
+                    self.dividers[0].grid(row=1, column=1, sticky="ns", padx=2)
+                self.pane_switch.grid(row=0, column=2 if mode == "split" else 0, sticky="ew", pady=(0, 6))
+                self.show_workspace_pane(self.pane_switch.get())
+        for column in range(5):
+            self.workspace.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        if mode == "wide":
+            self._pane_widths = self._fit_widths(width - 56, self._pane_weights, [280, 260, 340])
+            for column, size in zip((0, 2, 4), self._pane_widths):
+                self.workspace.grid_columnconfigure(column, minsize=size)
+            for column in (1, 3):
+                self.workspace.grid_columnconfigure(column, minsize=12)
+            channel_width, topic_width, _settings_width = self._pane_widths
+        elif mode == "split":
+            self._pane_widths = self._fit_widths(width - 44, self._split_weights, [280, 340])
+            self.workspace.grid_columnconfigure(0, minsize=self._pane_widths[0])
+            self.workspace.grid_columnconfigure(1, minsize=12)
+            self.workspace.grid_columnconfigure(2, minsize=self._pane_widths[1])
+            channel_width, topic_width = self._pane_widths
         else:
-            self.workspace.grid_columnconfigure(0, weight=1, uniform="workspace")
-            self.workspace.grid_columnconfigure(1, weight=1, uniform="workspace")
-            self.pane_switch.grid_remove()
-            self.source_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-            self.settings_panel.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+            self.workspace.grid_columnconfigure(0, weight=1)
+            channel_width = topic_width = width - 32
+        self.channel_hint.configure(wraplength=max(200, channel_width - 36))
+        for label in (self.source_title, self.topic_status, self.topic_empty, self.topic_count):
+            label.configure(wraplength=max(200, topic_width - 40))
+
+    @staticmethod
+    def _fit_widths(total, weights, minimums):
+        extra = max(0, total - sum(minimums))
+        weight_sum = sum(weights)
+        sizes = [minimum + int(extra * weight / weight_sum)
+                 for minimum, weight in zip(minimums, weights)]
+        sizes[-1] += max(0, total - sum(sizes))
+        return sizes
+
+    def _begin_pane_resize(self, index, event):
+        if self._layout_mode == "compact":
+            return
+        self._divider_drag = (self._layout_mode, index, event.x_root, self._pane_widths[:])
+
+    def _resize_panes(self, event):
+        if self._divider_drag is None:
+            return
+        mode, index, start, widths = self._divider_drag
+        if mode != self._layout_mode:
+            return
+        minimums = [280, 260, 340] if mode == "wide" else [280, 340]
+        delta = max(minimums[index] - widths[index],
+                    min(event.x_root - start, widths[index + 1] - minimums[index + 1]))
+        sizes = widths[:]
+        sizes[index] += delta
+        sizes[index + 1] -= delta
+        weights = [size - minimum for size, minimum in zip(sizes, minimums)]
+        if sum(weights) == 0:
+            return
+        if mode == "wide":
+            self._pane_weights = weights
+        else:
+            self._split_weights = weights
+        self._refresh_layout()
+
+    def _end_pane_resize(self, _event=None):
+        self._divider_drag = None
+        self._queue_preferences()
+
+    def reset_layout(self):
+        self._pane_weights = [1.0, 1.0, 1.0]
+        self._split_weights = [1.0, 1.0]
+        self._refresh_layout()
+        self._queue_preferences()
 
     def show_workspace_pane(self, pane):
-        if not self._compact_layout:
+        if self._layout_mode == "wide":
             return
-        self.source_panel.grid_remove()
+        self.topics_panel.grid_remove()
         self.settings_panel.grid_remove()
-        panel = self.source_panel if pane == "Channels & topics" else self.settings_panel
-        panel.grid(row=1, column=0, sticky="nsew", padx=0)
+        if self._layout_mode == "compact":
+            self.channels_panel.grid_remove()
+        panels = {"Channels": self.channels_panel, "Topics": self.topics_panel, "Settings": self.settings_panel}
+        panel = panels.get(pane, self.topics_panel)
+        panel.grid(row=1, column=2 if self._layout_mode == "split" else 0, sticky="nsew")
+
+    def _restore_connection_details(self):
+        if not self.remember_connection.get():
+            return
+        try:
+            saved = load_connection_details()
+            if saved:
+                for name in ("api_id", "api_hash", "phone"):
+                    getattr(self, name).insert(0, saved[name])
+                self.connection_status.configure(text="Saved connection details loaded")
+        except (OSError, ValueError, UnicodeError):
+            self.connection_status.configure(text="Could not read saved connection details")
+
+    def _connection_preference_changed(self):
+        self._queue_preferences()
+        if self.remember_connection.get():
+            self.connection_status.configure(text="Details will be saved after a successful login")
+            return
+        try:
+            forget_connection_details()
+            self.connection_status.configure(text="Connection details will not be saved")
+        except (OSError, ValueError):
+            self.connection_status.configure(text="Could not remove saved connection details")
+
+    def _complete_authentication(self):
+        if self.remember_connection.get() and self._login_credentials is not None:
+            try:
+                save_connection_details(*self._login_credentials)
+                self.connection_status.configure(text="Connection details saved privately")
+            except (OSError, ValueError):
+                self.connection_status.configure(text="Could not save connection details")
+                self.log("Could not save connection details. Check local folder permissions.")
+        self._login_credentials = None
+        for name in ("api_id", "api_hash", "phone"):
+            getattr(self, name).delete(0, "end")
+
+    def forget_saved_connection(self):
+        try:
+            forget_connection_details()
+            self.remember_connection.set(False)
+            for name in ("api_id", "api_hash", "phone"):
+                getattr(self, name).delete(0, "end")
+            self.connection_status.configure(text="Saved connection details removed")
+            self._queue_preferences()
+        except (OSError, ValueError):
+            self.connection_status.configure(text="Could not remove saved connection details")
 
     def browse(self):
         folder = filedialog.askdirectory()
@@ -429,6 +657,7 @@ class App(ctk.CTk):
             self.loop.close()
             self.loop = None
             return
+        self._login_credentials = (api_id, api_hash, phone)
         self.after(0, lambda: self.login_btn.configure(state="disabled"))
         self.log("🔄 Connecting to Telegram...")
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
@@ -447,25 +676,17 @@ class App(ctk.CTk):
 
             self.log("✅ Logged in successfully!")
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
-            self.after(0, lambda: self.api_hash.delete(0, "end"))
-            self.after(0, lambda: self.phone.delete(0, "end"))
-            self.after(0, lambda: self.api_id.delete(0, "end"))
+            self.after(0, self._complete_authentication)
 
             channels = await self.downloader.get_channels()
-            self.channels = channels
-            names = [f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels]
-
-            self.after(0, lambda: self.channel_menu.configure(values=names, state="normal"))
-            if names:
-                self.after(0, lambda: self.channel_menu.set(names[0]))
-                self.after(0, self.select_channel)
-            self.after(0, self.filter_channels)
+            self.after(0, self._apply_channels, channels)
             self.log(f"📋 {len(channels)} channels & groups loaded.")
 
         except Exception:
             self.log("❌ Login failed. Check credentials and account authentication settings.")
             self.after(0, lambda: self.login_btn.configure(state="normal"))
         finally:
+            self.after(0, lambda: setattr(self, "_login_credentials", None))
             self.downloader.otp_future = None
             self.after(0, lambda: self.otp.delete(0, "end"))
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
@@ -481,38 +702,121 @@ class App(ctk.CTk):
         else:
             self.log("❌ No OTP entered or login not started.")
 
+    def _apply_channels(self, channels):
+        self.channels = channels
+        for button in self.channel_buttons.values():
+            button.destroy()
+        self.channel_buttons = {}
+        for channel in channels:
+            title = channel.name if len(channel.name) <= 40 else channel.name[:39] + "…"
+            kind = "Forum" if getattr(channel.entity, "forum", False) else "Channel / group"
+            button = ctk.CTkButton(self.channel_list, text=f"{title}\n{kind} · {channel.id}",
+                anchor="w", height=56, fg_color="transparent", text_color=("#26384c", "#e0eafa"),
+                hover_color=("#dde6f0", "#314257"),
+                command=lambda cid=channel.id: self.choose_channel(cid))
+            button.pack(fill="x", padx=4, pady=3)
+            self.channel_buttons[channel.id] = button
+        self.channel_search.configure(state="normal" if channels else "disabled",
+            values=[f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels])
+        if channels:
+            self.choose_channel(channels[0].id)
+        else:
+            self.topic_var.set("No channels or groups available for this account.")
+            self.topic_empty.configure(text=self.topic_var.get())
+            self.progress_label.configure(text="No channels or groups available")
+        if self._account_visible:
+            self.toggle_account()
+
+    def choose_channel(self, channel_id):
+        if self.busy:
+            return
+        selected = next((c for c in self.channels if c.id == channel_id), None)
+        if selected is None:
+            return
+        label = f"{'📢' if selected.is_channel else '👥'} {selected.name} [{selected.id}]"
+        self.channel_var.set(label)
+        self.channel_search.set(label)
+        self.select_channel()
+        self.channel_search.configure(values=[f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in self.channels])
+        for button in self.channel_buttons.values():
+            button.pack(fill="x", padx=4, pady=3)
+        self.channel_hint.configure(text=f"{len(self.channels)} channels / groups")
+        if self._layout_mode != "wide":
+            self.pane_switch.set("Topics")
+            self.show_workspace_pane("Topics")
+
+    def choose_channel_from_dropdown(self, label):
+        selected = next((c for c in self.channels
+            if f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" == label), None)
+        if selected is not None:
+            self.choose_channel(selected.id)
+
+    def choose_topic_from_dropdown(self, label):
+        if self.busy:
+            return
+        if label in self.topic_checks:
+            self.topic_checks[label][0].set(True)
+        self.topic_search.set("")
+        self.filter_topics()
+
+    def choose_filtered_topic(self, _event=None):
+        query = self.topic_search.get().strip().casefold()
+        label = next((label for label in self.topics if query in label.casefold()), None)
+        if label is not None:
+            self.choose_topic_from_dropdown(label)
+
     def choose_filtered_channel(self, _event=None):
         if self.busy:
             return
         query = self.channel_search.get().strip().casefold()
-        matches = [c for c in self.channels if query in c.name.casefold() or query in str(c.id)]
-        if matches:
-            c = matches[0]
-            self.channel_var.set(f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]")
-            self.select_channel()
+        selected = next((c for c in self.channels if query in f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]".casefold()), None)
+        if selected is not None:
+            self.choose_channel(selected.id)
 
     def filter_channels(self, _event=None):
-        if self.busy:
+        if self.busy or (_event is not None and _event.keysym in ("Return", "Up", "Down", "Escape")):
             return
         query = self.channel_search.get().strip().casefold()
-        names = [f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in self.channels
-                 if query in c.name.casefold() or query in str(c.id)]
-        self.channel_menu.configure(values=names or ["No matches"], state="normal" if names else "disabled")
-        self.channel_hint.configure(text=f"{len(names)} matching channels / groups. Selected: {self.channel_var.get() or 'none'}")
+        visible = 0
+        matches = []
+        for channel in self.channels:
+            button = self.channel_buttons[channel.id]
+            button.pack_forget()
+            label = f"{'📢' if channel.is_channel else '👥'} {channel.name} [{channel.id}]"
+            if query in label.casefold():
+                button.pack(fill="x", padx=4, pady=3)
+                visible += 1
+                matches.append(label)
+        self.channel_search.configure(values=matches)
+        text = f"{visible} matching channels / groups" if query else f"{visible} channels / groups"
+        self.channel_hint.configure(text=text if self.channels else "No channels or groups available.")
 
     def filter_topics(self, _event=None):
+        if self.busy or (_event is not None and _event.keysym in ("Return", "Up", "Down", "Escape")):
+            return
         query = self.topic_search.get().strip().casefold()
         for label, (_var, check) in self.topic_checks.items():
             check.pack_forget()
             if query in label.casefold():
                 check.pack(anchor="w", fill="x", padx=6, pady=4)
+        values = [label for label in self.topics if query in label.casefold()]
+        self.topic_search.configure(values=values)
+        matches = len(values)
+        if self.topics and not matches:
+            self.topic_empty.configure(text="No topics match your search.")
+            self.topic_empty.pack(anchor="w", padx=6, pady=16)
+        elif self.topics:
+            self.topic_empty.pack_forget()
         self.update_topic_count()
 
     def update_topic_count(self):
         count = sum(var.get() for var, _check in self.topic_checks.values())
         visible = sum(self.topic_search.get().strip().casefold() in label.casefold() for label in self.topic_checks)
-        self.topic_count.configure(text=f"{count} selected · {visible} matching topics (search preserves selections)")
-        self.start_btn.configure(state="normal" if not self.busy and (count or not getattr(self.selected_channel().entity, "forum", False)) else "disabled")
+        self.topic_count.configure(text=f"{count} selected · {visible} matching topics")
+        ready = bool(self.channels and (count or not getattr(self.selected_channel().entity, "forum", False)))
+        self.start_btn.configure(state="normal" if ready and not self.busy else "disabled")
+        if not self.busy:
+            self.progress_label.configure(text="Ready to download" if ready else "Choose at least one topic")
 
     def select_topics(self, selected):
         if self.busy:
@@ -529,23 +833,35 @@ class App(ctk.CTk):
             if f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" == self.channel_var.get())
 
     def select_channel(self, _value=None):
+        if self.busy:
+            return
         self.topic_generation += 1
         generation = self.topic_generation
         self.topics = {}
         for _var, check in self.topic_checks.values():
             check.destroy()
         self.topic_checks = {}
-        self.topic_search.delete(0, "end")
+        self.topic_search.set("")
+        self.topic_search.configure(values=[])
         self.topic_count.configure(text="No topics selected")
         selected = self.selected_channel()
-        self.channel_hint.configure(text=f"Selected: {selected.name}")
+        self.source_title.configure(text=f"{selected.name} [{selected.id}]")
+        for cid, button in self.channel_buttons.items():
+            button.configure(fg_color=("#dbeafa", "#284667") if cid == selected.id else "transparent")
         self.start_btn.configure(state="disabled")
-        self.topic_menu.configure(state="disabled")
+        self.topic_search.configure(state="disabled")
+        self.select_topics_btn.configure(state="disabled")
+        self.clear_topics_btn.configure(state="disabled")
+        self.topic_empty.pack(anchor="w", padx=6, pady=16)
         if not getattr(selected.entity, "forum", False):
             self.topic_var.set("No topic required")
+            self.topic_empty.configure(text="The entire channel or group is selected.")
             self.start_btn.configure(state="normal")
+            self.progress_label.configure(text="Ready · Entire channel or group selected")
             return
+        self.progress_label.configure(text="Loading topics…")
         self.topic_var.set("Loading topics...")
+        self.topic_empty.configure(text="Loading topics…")
         async def load():
             try:
                 topics = await self.downloader.get_topics(selected)
@@ -558,19 +874,26 @@ class App(ctk.CTk):
             self.topics = {f"{t.title} [{t.id}]": t.id for t in topics}
             if error:
                 self.topic_var.set("Topics unavailable — reselect group to retry")
+                self.progress_label.configure(text="Topics unavailable · Click the group to retry")
+                self.topic_empty.configure(text="Click this group in the sidebar to retry.")
                 self.log("❌ Could not load topics. Reselect the group to retry.")
                 return
             if not topics:
                 self.topic_var.set("No topics available in this group.")
+                self.topic_empty.configure(text=self.topic_var.get())
+                self.progress_label.configure(text="No topics available in this group")
                 return
-            self.topic_menu.configure(values=list(self.topics), state="normal")
+            self.topic_empty.pack_forget()
+            self.topic_search.configure(state="normal", values=list(self.topics))
+            self.select_topics_btn.configure(state="normal")
+            self.clear_topics_btn.configure(state="normal")
             self.topic_var.set("Choose one or more topics below.")
             for label in self.topics:
                 var = ctk.BooleanVar(value=False)
                 check = ctk.CTkCheckBox(self.topic_list, text=label, variable=var, command=self.update_topic_count)
                 check.pack(anchor="w", fill="x", padx=6, pady=4)
                 self.topic_checks[label] = (var, check)
-            self.start_btn.configure(state="disabled")
+            self.update_topic_count()
         asyncio.run_coroutine_threadsafe(load(), self.loop)
 
     def start_download(self):
@@ -627,7 +950,10 @@ class App(ctk.CTk):
         # Reset before scheduling so an immediate Cancel cannot be overwritten.
         self.downloader.paused = False
         self.downloader.cancelled = False
-        self.channel_menu.configure(state="disabled")
+        for button in self.channel_buttons.values():
+            button.configure(state="disabled")
+        self.select_topics_btn.configure(state="disabled")
+        self.clear_topics_btn.configure(state="disabled")
         self.channel_search.configure(state="disabled")
         self.topic_search.configure(state="disabled")
         for _var, check in self.topic_checks.values():
@@ -682,9 +1008,12 @@ class App(ctk.CTk):
             self.busy = False
             self.progress.stop()
             self.progress.configure(mode="determinate")
-            self.channel_menu.configure(state="normal")
+            for button in self.channel_buttons.values():
+                button.configure(state="normal")
+            self.select_topics_btn.configure(state="normal" if self.topics else "disabled")
+            self.clear_topics_btn.configure(state="normal" if self.topics else "disabled")
             self.channel_search.configure(state="normal")
-            self.topic_search.configure(state="normal")
+            self.topic_search.configure(state="normal" if self.topics else "disabled")
             for _var, check in self.topic_checks.values():
                 check.configure(state="normal")
             self.start_btn.configure(state="normal")

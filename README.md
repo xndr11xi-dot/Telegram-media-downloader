@@ -52,8 +52,14 @@ python main.py
 The app automatically remembers your download folder, media selections, custom
 extensions, file limit, download order and date cutoff. Preferences are stored
 privately in the ignored preferences.local.json file beside the application.
-Authentication fields are excluded. Channel and topic selections are chosen
-after login.
+Connection details are saved separately when Remember connection details on this
+Mac is checked. After a successful login, the API ID, API hash and phone number
+are stored as plaintext in .telegram-downloader/credentials.json, with owner-only
+file permissions (600) inside a private directory (700). This directory is
+excluded from Git. The fields are filled on the next launch; click Log in to
+connect. Telegram codes are never saved. Forget saved details removes the file,
+clears the fields and disables remembering. Unchecking Remember also removes
+previously saved details. Channel and topic selections are chosen after login.
 
 Use Calendar beside the date field to select a day, navigate months, choose
 Today or clear the cutoff. The field also accepts YYYY-MM-DD directly. Calendar
@@ -68,17 +74,36 @@ date blank for the usual download behavior. Date-filtered runs use the same
 media filters and per-topic limits, and bypass the normal sync checkpoint so
 you can revisit older dates.
 
-## Desktop layout
+## Library layout
 
-Wide windows show channels and topics on the left and download settings on the
-right. The topic list grows with the window; settings scroll independently when
-needed. Below 1040 pixels wide, use the Channels & topics / Download settings
-switch to move between panels. Your selections stay in place when resizing.
+The wider channel sidebar has a typable dropdown. Open its arrow to browse full
+channel names and IDs without typing, or type a title or ID to filter and press
+Return to select the first match. The sidebar rows also remain clickable. After
+selection, the dropdown restores the full list for browsing the next channel.
 
-Use Hide login after signing in to free space. Activity has Log and History tabs
-and can also be hidden. On shorter screens it starts collapsed; choose Show
-activity to open it. Progress and Start / Pause / Cancel stay visible at the
-bottom of the window.
+The narrower topics column has a typable dropdown and checkboxes. Selecting an
+item from the dropdown adds it to the checked topics, then restores the full list.
+Use checkboxes to deselect individual topics or Clear to remove all selections.
+Typing filters both the dropdown and the checkbox list while preserving hidden
+selections. IDs distinguish duplicate titles. Click a group again to retry topic
+loading.
+
+Media filters, the file limit and download folder are on the right. Expand
+Dates, order & custom types for the calendar, download order and custom extensions.
+The current date and order remain visible in the settings summary. Preferences
+restore automatically, including settings in the collapsed section.
+
+Drag the vertical dividers to set the width of each section. Widths and window
+size are saved automatically and restored on the next launch. Each section has
+a minimum width to keep controls accessible. Reset layout restores balanced
+section widths. At 1160 pixels or wider all three columns are visible. Medium windows keep the
+sidebar and switch between Topics and Settings. Below 880 pixels, the Channels,
+Topics and Settings switch shows one panel at a time. Resizing preserves inputs.
+The app follows the system's light or dark appearance.
+
+Login collapses after your channels load and can be reopened with Show login.
+Activity opens the Log and History tabs above the footer. Progress and the
+Start / Pause / Cancel controls stay available at the bottom.
 
 ## Privacy
 
