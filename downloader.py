@@ -64,6 +64,20 @@ def save_last_id(channel_id, message_id, topic_id=None, media_filter=None, folde
     write_json(SYNC_FILE, data)
 
 
+def reset_channel_sync(channel_id):
+    """Clear checkpoints for one source, across all topics, filters and folders."""
+    if type(channel_id) is not int or channel_id == 0:
+        raise ValueError("Select a valid channel or group")
+    data = read_json(SYNC_FILE, {})
+    prefix = f"{channel_id}:"
+    remaining = {key: value for key, value in data.items()
+                 if key != str(channel_id) and not key.startswith(prefix)}
+    removed = len(data) - len(remaining)
+    if removed:
+        write_json(SYNC_FILE, remaining)
+    return removed
+
+
 def group_folder(base, name, channel_id):
     # Telegram titles cannot introduce path components or parent traversal.
     component = re.sub(r"[^\w .-]", "_", name).strip(" .")[:80] or "group"

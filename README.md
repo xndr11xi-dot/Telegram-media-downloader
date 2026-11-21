@@ -169,6 +169,19 @@ posted the forward, and anonymous/channel posts expose their group/channel
 identity rather than a hidden person's account. The first run for a new sender
 may scan the selected history before subsequent runs resume incrementally.
 
+## Rescan history and recover missing files
+
+Select a channel or group, then click Reset saved sync at the bottom of the
+Channels panel. The confirmation identifies the selected source. This clears
+its saved sync positions across all topics, senders, media filters and destination
+folders. Other sources keep their saved positions. Reset is available while idle.
+
+After resetting, choose All, clear the optional date and click Start to rescan
+history using the current topic, sender and media selections. Files still present
+in the destination are skipped, and missing matching files are downloaded again.
+A completed run establishes a new checkpoint. Activity history remains a separate
+record of previous runs.
+
 ## Security and compatibility
 
 Keep all credentials, OTPs, passwords, sessions, media, configuration and local

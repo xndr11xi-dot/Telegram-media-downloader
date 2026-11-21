@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import asyncio
 import threading
 import os
@@ -9,7 +9,7 @@ from local_data import (
     read_json, write_json, load_connection_details, save_connection_details,
     forget_connection_details,
 )
-from downloader import TelegramDownloader, group_folder, topic_folder, TopicFolderConflict
+from downloader import TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync
 from telethon import utils
 from history import load_history, save_history
 
@@ -162,6 +162,9 @@ class App(ctk.CTk):
         self.channel_hint = ctk.CTkLabel(self.channels_panel,
             text="Log in to load your library.", wraplength=185, justify="left", anchor="w")
         self.channel_hint.grid(row=3, column=0, sticky="ew", padx=12, pady=(4, 12))
+        self.sync_reset_btn = ctk.CTkButton(self.channels_panel, text="Reset saved sync…",
+            state="disabled", command=self.reset_selected_sync)
+        self.sync_reset_btn.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         self.topics_panel = ctk.CTkFrame(self.workspace, fg_color=surface)
         self.topics_panel.grid_propagate(False)
@@ -664,6 +667,31 @@ class App(ctk.CTk):
         except (OSError, ValueError):
             self.connection_status.configure(text="Could not remove saved connection details")
 
+    def reset_selected_sync(self):
+        if self.busy:
+            return
+        if not self.channels:
+            self.progress_label.configure(text="Choose a channel or group first")
+            return
+        selected = self.selected_channel()
+        confirmed = messagebox.askyesno(
+            "Reset saved sync?",
+            f"{selected.name} [{selected.id}]\n\n"
+            "Clear this source's saved sync positions across all topics, senders, media filters and folders?\n\n"
+            "Choose All and clear the date to rescan matching history on the next Start. "
+            "Existing files will be skipped and missing files can be downloaded again.",
+            parent=self, default="no")
+        if not confirmed or self.busy:
+            return
+        try:
+            removed = reset_channel_sync(selected.id)
+        except (OSError, UnicodeError):
+            self.progress_label.configure(text="Could not reset saved sync · Check local permissions")
+            self.log("Could not reset saved sync. Check local state-file permissions.")
+            return
+        self.progress_label.configure(text="Sync reset · Choose All, clear the date, then Start to rescan")
+        self.log(f"Sync reset for {selected.name} [{selected.id}]: {removed} saved positions cleared.")
+
     def browse(self):
         folder = filedialog.askdirectory()
         if folder:
@@ -772,6 +800,7 @@ class App(ctk.CTk):
                 command=lambda cid=channel.id: self.choose_channel(cid))
             button.pack(fill="x", padx=4, pady=3)
             self.channel_buttons[channel.id] = button
+        self.sync_reset_btn.configure(state="normal" if channels else "disabled")
         self.channel_search.configure(state="normal" if channels else "disabled",
             values=[f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels])
         if channels:
@@ -1145,6 +1174,7 @@ class App(ctk.CTk):
         base_folder = folder
         self.log("Starting download for the selected channel/topic...")
         self.busy = True
+        self.sync_reset_btn.configure(state="disabled")
         if not self._activity_visible:
             self.toggle_activity()
         self.activity_tabs.set("Transfer")
@@ -1234,6 +1264,7 @@ class App(ctk.CTk):
                 self.after(0, finish)
         def finish():
             self.busy = False
+            self.sync_reset_btn.configure(state="normal" if self.channels else "disabled")
             self.progress.stop()
             self.progress.configure(mode="determinate")
             for button in self.channel_buttons.values():
