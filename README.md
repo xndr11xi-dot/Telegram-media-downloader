@@ -102,7 +102,14 @@ Topics and Settings switch shows one panel at a time. Resizing preserves inputs.
 The app follows the system's light or dark appearance.
 
 Login collapses after your channels load and can be reopened with Show login.
-Activity opens the Log and History tabs above the footer. Progress and the
+Activity opens Transfer, Log and History tabs above the footer. Transfer opens
+automatically when a download starts and shows the current source and file,
+received/total bytes, file percentage, average transfer speed and estimated time
+remaining for that file. A compact summary stays in the footer when Activity is
+closed. Downloaded/skipped counts cover all selected topics. Unknown file sizes
+show size unknown and no ETA. Speed is averaged over the current attempt,
+excluding paused time, and resets on retry. All mode scans without a known file
+total, so the main progress bar remains animated during scanning. Progress and the
 Start / Pause / Cancel controls stay available at the bottom.
 
 ## Privacy
@@ -160,10 +167,9 @@ already downloaded. New filenames use the Telegram message date in UTC.
 Checkpoints include group, topic, media filter and destination. Old checkpoints
 are deliberately ignored to avoid carrying forward potentially incomplete scans.
 A completed All scan advances sync; failure or cancellation leaves it unchanged.
-State/history writes use private files and atomic replacement. Pause and cancel
-are honored between requests/retries; an in-flight Telegram request finishes
-before its temporary file is discarded on cancellation. These controls do not
-interrupt an active network transfer.
+State/history writes use private files and atomic replacement. Pause and cancel are honored at Telegram's transfer progress callbacks and
+between requests/retries. An in-flight request may finish before cancellation
+removes its temporary file.
 
 This distribution contains the runtime application and its dependencies. Development
 tests, audit tools and review documents are maintained separately and are not

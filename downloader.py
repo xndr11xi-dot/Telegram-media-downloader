@@ -17,6 +17,7 @@ import json
 import hashlib
 import re
 import tempfile
+import time
 from datetime import timezone
 from local_data import read_json, write_json
 
@@ -85,6 +86,50 @@ def media_filename(message):
         return legacy
     stem, extension = os.path.splitext(legacy)
     return f"{stem}_{day.isoformat()}{extension}"
+
+
+class _TransferCancelled(Exception):
+    pass
+
+
+class _FileTransfer:
+    """Per-attempt byte progress, throttled to keep the UI responsive."""
+    def __init__(self, downloader, filename, attempt, emit):
+        self.downloader = downloader
+        self.filename = filename
+        self.attempt = attempt
+        self.emit = emit
+        self.started = time.monotonic()
+        self.last_report = self.started
+        self.paused_seconds = 0.0
+        self.received = 0
+        self.total = None
+
+    def report(self, state, force=False):
+        now = time.monotonic()
+        if not force and now - self.last_report < 0.25:
+            return
+        self.last_report = now
+        elapsed = max(0.0, now - self.started - self.paused_seconds)
+        speed = self.received / elapsed if elapsed > 0 else 0.0
+        if state != "downloading":
+            speed = 0.0
+        eta = max(0, self.total - self.received) / speed if self.total and speed > 0 else None
+        self.emit(state, filename=self.filename, received=self.received,
+                  total=self.total, speed=speed, eta=eta, attempt=self.attempt)
+
+    async def update(self, received, total):
+        self.received = max(0, int(received))
+        self.total = int(total) if total is not None and total > 0 else None
+        if self.downloader.paused and not self.downloader.cancelled:
+            self.report("paused", force=True)
+            paused_at = time.monotonic()
+            while self.downloader.paused and not self.downloader.cancelled:
+                await asyncio.sleep(0.1)
+            self.paused_seconds += time.monotonic() - paused_at
+        if self.downloader.cancelled:
+            raise _TransferCancelled()
+        self.report("downloading", force=bool(self.total and self.received >= self.total))
 
 
 class TelegramDownloader:
@@ -191,7 +236,7 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None):
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None):
         forum = bool(getattr(channel.entity, "forum", False))
         if forum and (type(topic_id) is not int or topic_id < 1):
             raise ValueError("Select a topic before downloading from a forum.")
@@ -212,6 +257,19 @@ class TelegramDownloader:
 
         count = 0
         skipped = 0
+        last_skip_report = 0.0
+
+        def notify(state, **details):
+            nonlocal last_skip_report
+            if on_transfer is None:
+                return
+            if state == "skipping":
+                now = time.monotonic()
+                if now - last_skip_report < 0.25:
+                    return
+                last_skip_report = now
+            on_transfer(dict(state=state, downloaded=count, skipped=skipped,
+                             limit=file_limit, **details))
 
         if file_limit is not None and (type(file_limit) is not int or file_limit < 1):
             raise ValueError("File limit must be positive")
@@ -231,6 +289,8 @@ class TelegramDownloader:
         if cutoff_date is not None:
             relation = "on or after" if reverse else "on or before"
             on_log(f"Message dates {relation} {cutoff_date.isoformat()} (UTC).")
+
+        notify("scanning")
 
         # General uses ordinary history; other forum topics are reply threads.
         scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
@@ -278,6 +338,7 @@ class TelegramDownloader:
             ):
                 on_log(f"⏭ Already exists: {message.id}")
                 skipped += 1
+                notify("skipping", filename=filename)
                 continue
 
             succeeded = False
@@ -287,11 +348,20 @@ class TelegramDownloader:
                 if self.cancelled:
                     break
                 temporary = None
+                transfer = _FileTransfer(self, filename, attempt + 1, notify) if on_transfer else None
+                if transfer:
+                    transfer.report("starting", force=True)
                 try:
                     # Passing a stream prevents Telegram filenames from escaping the folder.
                     fd, temporary = tempfile.mkstemp(prefix=".telegram-", suffix=".part", dir=folder)
                     with os.fdopen(fd, "wb") as output:
-                        path = await message.download_media(file=output)
+                        if transfer:
+                            path = await message.download_media(file=output, progress_callback=transfer.update)
+                        else:
+                            path = await message.download_media(file=output)
+                        if transfer and path:
+                            transfer.received = output.tell()
+                            transfer.total = transfer.received
                     if not path:
                         raise RuntimeError("Telegram returned no media")
                     if self.cancelled:
@@ -300,12 +370,18 @@ class TelegramDownloader:
                     temporary = None
                     succeeded = True
                     count += 1
+                    if transfer:
+                        transfer.report("file_complete", force=True)
                     fraction = 0.0 if not file_limit else min(count / file_limit, 1.0)
                     on_log(f"✅ [{count}/{file_limit or '∞'}] {filename}")
                     on_progress(count, skipped, fraction)
                     await asyncio.sleep(1)
                     break
+                except _TransferCancelled:
+                    break
                 except Exception:
+                    if transfer:
+                        transfer.report("retrying" if attempt < 4 else "failed", force=True)
                     # Never log exception text: it may include request secrets or paths.
                     on_log(f"⚠ Download attempt {attempt + 1} failed.")
                     if attempt < 4 and not self.cancelled:
@@ -327,5 +403,7 @@ class TelegramDownloader:
         if not complete or self.cancelled:
             on_log("Download stopped without advancing sync.")
         on_done(count, skipped)
-        return "cancelled" if self.cancelled else ("complete" if complete else "incomplete")
+        status = "cancelled" if self.cancelled else ("complete" if complete else "incomplete")
+        notify("scope_" + status)
+        return status
 
