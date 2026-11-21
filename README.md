@@ -131,7 +131,12 @@ MIT License
 
 For forum-enabled supergroups, choose one or more topics after selecting the group. Topic
 names include their IDs so duplicate titles remain distinguishable. Downloads
-are saved under `topic_<id>` inside the group folder and history records the topic.
+are saved under a sanitized topic name plus its ID, such as `Photography_12345`,
+inside the group folder. History records the topic.
+Existing `topic_<id>` folders are renamed on the next download and their sync
+checkpoints migrate with them. Files are retained. Later topic-title changes
+reuse the existing folder by ID. If multiple folders already share a topic ID,
+the app reports a conflict so you can review them before downloading.
 Ordinary channels and groups keep their existing behavior.
 
 Topic matching uses Telegram's `forum_topic`, `reply_to_top_id`, and
@@ -143,6 +148,26 @@ whole-group download when topic loading fails.
 Topic sync checkpoints are independent of whole-group checkpoints and of other
 topics and media filters. Only a completed All scan advances the checkpoint;
 cancelled or failed scans can be retried without skipping unfinished files.
+
+## Download from a specific sender
+
+In Download settings, use the sender field and Find. Enter an @username, a numeric
+Telegram sender ID, or a name to search the selected group's members. For multiple
+matches, select the intended sender from the dropdown; IDs distinguish duplicate
+names. Numeric IDs can be used directly without loading a sender profile.
+
+Only selected sender combines with the chosen topics, media types, file limit,
+date and download order. Uncheck it to include Everyone. Sender choices reset
+when changing channels/groups. Sender-filtered incremental checkpoints are
+independent from Everyone and from other senders; existing matching files in the
+same destination are still skipped.
+
+Member-name search depends on Telegram's permissions and may be unavailable.
+Username and numeric-ID input provide other ways to choose a sender. Filtering
+uses the sender identity attached to the message. Forwards match the account that
+posted the forward, and anonymous/channel posts expose their group/channel
+identity rather than a hidden person's account. The first run for a new sender
+may scan the selected history before subsequent runs resume incrementally.
 
 ## Security and compatibility
 

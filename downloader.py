@@ -1,4 +1,4 @@
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 try:
     # Telethon 1.45 / Telegram layer 214 moved forum discovery to messages.
     from telethon.tl.functions.messages import GetForumTopicsRequest
@@ -9,7 +9,8 @@ except ImportError:
 from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
-    DocumentAttributeFilename
+    DocumentAttributeFilename,
+    User, Channel,
 )
 import asyncio
 import os
@@ -24,9 +25,15 @@ from local_data import read_json, write_json
 # ── Incremental sync ──
 SYNC_FILE = "sync_state.json"
 
-def sync_key(channel_id, topic_id=None, media_filter=None, folder=None):
+
+class TopicFolderConflict(FileExistsError):
+    pass
+
+def sync_key(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None):
     filters = sorted(set(x.strip().lower() for x in (media_filter or "all").split(",")))
     scope = f"{channel_id}:topic:{topic_id}:filter:{','.join(filters)}"
+    if sender_id is not None:
+        scope += f":sender:{sender_id}"
     if folder is not None:
         destination = os.path.normcase(os.path.realpath(folder))
         scope += ":destination:" + hashlib.sha256(os.fsencode(destination)).hexdigest()
@@ -43,15 +50,15 @@ def message_in_topic(message, topic_id):
     return topic_id == 1
 
 
-def load_last_id(channel_id, topic_id=None, media_filter=None, folder=None):
+def load_last_id(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None):
     data = read_json(SYNC_FILE, {})
-    value = data.get(sync_key(channel_id, topic_id, media_filter, folder), 0)
+    value = data.get(sync_key(channel_id, topic_id, media_filter, folder, sender_id), 0)
     return value if type(value) is int and value >= 0 else 0
 
 
-def save_last_id(channel_id, message_id, topic_id=None, media_filter=None, folder=None):
+def save_last_id(channel_id, message_id, topic_id=None, media_filter=None, folder=None, sender_id=None):
     data = read_json(SYNC_FILE, {})
-    key = sync_key(channel_id, topic_id, media_filter, folder)
+    key = sync_key(channel_id, topic_id, media_filter, folder, sender_id)
     previous = data.get(key, 0)
     data[key] = max(previous if type(previous) is int else 0, message_id)
     write_json(SYNC_FILE, data)
@@ -61,6 +68,58 @@ def group_folder(base, name, channel_id):
     # Telegram titles cannot introduce path components or parent traversal.
     component = re.sub(r"[^\w .-]", "_", name).strip(" .")[:80] or "group"
     return os.path.join(base, f"{component}_{channel_id}")
+
+
+def topic_folder(base, title, channel_id, topic_id):
+    """Reuse folders by topic ID, migrating legacy names and their checkpoints."""
+    if type(topic_id) is not int or topic_id < 1:
+        raise ValueError("Topic ID must be a positive integer")
+    os.makedirs(base, exist_ok=True)
+    legacy = os.path.join(base, f"topic_{topic_id}")
+    safe_title = (title or "Topic").encode("utf-8")[:180].decode("utf-8", errors="ignore")
+    destination = group_folder(base, safe_title, topic_id)
+    if os.path.basename(destination).casefold() == f"topic_{topic_id}".casefold():
+        destination = group_folder(base, safe_title + " files", topic_id)
+    candidates = []
+    with os.scandir(base) as entries:
+        for entry in entries:
+            if not entry.name.endswith(f"_{topic_id}"):
+                continue
+            if entry.is_symlink():
+                raise ValueError("Topic folders must not be symbolic links")
+            if entry.path != legacy and entry.is_dir(follow_symlinks=False):
+                candidates.append(entry.path)
+    if len(candidates) > 1 or (candidates and os.path.lexists(legacy)):
+        raise TopicFolderConflict("Multiple folders exist for this topic ID")
+    if candidates:
+        destination = candidates[0]
+    if os.path.lexists(legacy):
+        if not os.path.isdir(legacy):
+            raise TopicFolderConflict("The legacy topic path is not a directory")
+        if legacy != destination:
+            os.rename(legacy, destination)
+    if os.path.lexists(destination) and not os.path.isdir(destination):
+        raise TopicFolderConflict("The topic path is not a directory")
+    # Run even after a rename: an interrupted state write can be retried safely.
+    if destination != legacy:
+        old_tail = sync_key(channel_id, topic_id, folder=legacy).split(":destination:")[1]
+        new_tail = sync_key(channel_id, topic_id, folder=destination).split(":destination:")[1]
+        if old_tail == new_tail:
+            return destination
+        data = read_json(SYNC_FILE, {})
+        changed = False
+        for key, value in list(data.items()):
+            if not key.startswith(f"{channel_id}:topic:{topic_id}:filter:") or not key.endswith(":destination:" + old_tail):
+                continue
+            if type(value) is int and value >= 0:
+                target = key[:-len(old_tail)] + new_tail
+                previous = data.get(target)
+                data[target] = min(value, previous) if type(previous) is int and previous >= 0 else value
+            del data[key]
+            changed = True
+        if changed:
+            write_json(SYNC_FILE, data)
+    return destination
 
 
 def message_day(message):
@@ -202,6 +261,29 @@ class TelegramDownloader:
             offset_id, offset_topic = last.top_message, last.id
         return sorted(topics.values(), key=lambda t: (t.id != 1, t.title.casefold(), t.id))
 
+    async def find_senders(self, channel, query):
+        query = query.strip()
+        if not query:
+            return []
+        if re.fullmatch(r"-?[0-9]+", query):
+            sender_id = int(query)
+            if sender_id == 0:
+                raise ValueError("Sender ID must be nonzero")
+            return [utils.get_peer(sender_id)]
+        if query.startswith("@"):
+            entity = await self.client.get_entity(query)
+            if not isinstance(entity, (User, Channel)):
+                raise ValueError("Choose a user or channel sender")
+            return [entity]
+        matches = []
+        async for user in self.client.iter_participants(channel.entity, search=query, limit=30):
+            label = " ".join(filter(None, (getattr(user, "first_name", None),
+                                            getattr(user, "last_name", None),
+                                            getattr(user, "username", None))))
+            if query.casefold() in label.casefold():
+                matches.append(user)
+        return matches
+
     def matches_filter(self, message, media_filter):
         if media_filter and "," in media_filter:
             return any(self.matches_filter(message, token.strip()) for token in media_filter.split(",") if token.strip())
@@ -236,7 +318,9 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None):
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None):
+        if sender_id is not None and (type(sender_id) is not int or sender_id == 0):
+            raise ValueError("Select a valid sender ID")
         forum = bool(getattr(channel.entity, "forum", False))
         if forum and (type(topic_id) is not int or topic_id < 1):
             raise ValueError("Select a topic before downloading from a forum.")
@@ -276,7 +360,7 @@ class TelegramDownloader:
 
         # A restricted date scan must not change or depend on the unrestricted checkpoint.
         use_checkpoint = limit_mode == "all" and cutoff_date is None
-        last_id = load_last_id(channel.id, topic_id, media_filter, folder) if use_checkpoint else 0
+        last_id = load_last_id(channel.id, topic_id, media_filter, folder, sender_id) if use_checkpoint else 0
         high_id = last_id
         complete = True
         if last_id:
@@ -313,6 +397,8 @@ class TelegramDownloader:
             if not message_in_topic(message, topic_id):
                 continue
             high_id = max(high_id, message.id)
+            if sender_id is not None and getattr(message, "sender_id", None) != sender_id:
+                continue
 
             if not message.media:
                 continue
@@ -399,7 +485,7 @@ class TelegramDownloader:
                 break
 
         if complete and not self.cancelled and use_checkpoint:
-            save_last_id(channel.id, high_id, topic_id, media_filter, folder)
+            save_last_id(channel.id, high_id, topic_id, media_filter, folder, sender_id)
         if not complete or self.cancelled:
             on_log("Download stopped without advancing sync.")
         on_done(count, skipped)

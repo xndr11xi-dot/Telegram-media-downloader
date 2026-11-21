@@ -9,7 +9,8 @@ from local_data import (
     read_json, write_json, load_connection_details, save_connection_details,
     forget_connection_details,
 )
-from downloader import TelegramDownloader, group_folder
+from downloader import TelegramDownloader, group_folder, topic_folder, TopicFolderConflict
+from telethon import utils
 from history import load_history, save_history
 
 ctk.set_appearance_mode("system")
@@ -46,6 +47,9 @@ class App(ctk.CTk):
         self.downloader = None
         self.loop = None
         self.channels = []
+        self.senders = {}
+        self.sender_id = None
+        self.sender_generation = 0
         self.topics = {}
         self.topic_generation = 0
         self.busy = False
@@ -198,6 +202,24 @@ class App(ctk.CTk):
         settings = self.settings_panel
         ctk.CTkLabel(settings, text="Download settings", font=ctk.CTkFont(size=14, weight="bold")).pack(
             anchor="w", padx=12, pady=(8, 4))
+        self.sender_filter = ctk.BooleanVar(value=False)
+        self.sender_toggle = ctk.CTkCheckBox(settings, text="Only selected sender", variable=self.sender_filter,
+                                            command=self._update_sender_status)
+        self.sender_toggle.pack(anchor="w", padx=12, pady=(8, 4))
+        sender_row = ctk.CTkFrame(settings, fg_color="transparent")
+        sender_row.pack(fill="x", padx=12)
+        self.sender_query = ctk.CTkComboBox(sender_row, width=160, values=[], state="disabled",
+                                           command=self.choose_sender)
+        self.sender_query.set("")
+        self.sender_query.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.sender_query.bind("<Return>", lambda _event: self.find_sender())
+        self.sender_query.bind("<KeyRelease>", self._sender_query_changed)
+        self.sender_find = ctk.CTkButton(sender_row, text="Find", width=60,
+                                        state="disabled", command=self.find_sender)
+        self.sender_find.pack(side="right")
+        self.sender_status = ctk.CTkLabel(settings, text="Everyone · Find @username, user ID or name",
+                                         wraplength=280, justify="left", anchor="w")
+        self.sender_status.pack(fill="x", padx=12, pady=(4, 8))
         ctk.CTkLabel(settings, text="Media types").pack(anchor="w", padx=12, pady=(8, 0))
         quick_row = ctk.CTkFrame(settings, fg_color="transparent")
         quick_row.pack(fill="x", padx=8)
@@ -848,9 +870,14 @@ class App(ctk.CTk):
         visible = sum(self.topic_search.get().strip().casefold() in label.casefold() for label in self.topic_checks)
         self.topic_count.configure(text=f"{count} selected · {visible} matching topics")
         ready = bool(self.channels and (count or not getattr(self.selected_channel().entity, "forum", False)))
+        ready = ready and (not self.sender_filter.get() or self.sender_id is not None)
         self.start_btn.configure(state="normal" if ready and not self.busy else "disabled")
         if not self.busy:
-            self.progress_label.configure(text="Ready to download" if ready else "Choose at least one topic")
+            if self.sender_filter.get() and self.sender_id is None:
+                text = "Choose a sender or uncheck the sender filter"
+            else:
+                text = "Ready to download" if ready else "Choose at least one topic"
+            self.progress_label.configure(text=text)
 
     def select_topics(self, selected):
         if self.busy:
@@ -869,6 +896,14 @@ class App(ctk.CTk):
     def select_channel(self, _value=None):
         if self.busy:
             return
+        self.sender_generation += 1
+        self.sender_id = None
+        self.senders = {}
+        self.sender_filter.set(False)
+        self.sender_query.set("")
+        self.sender_query.configure(values=[], state="normal")
+        self.sender_find.configure(state="normal")
+        self.sender_status.configure(text="Everyone · Find @username, user ID or name")
         self.topic_generation += 1
         generation = self.topic_generation
         self.topics = {}
@@ -930,6 +965,89 @@ class App(ctk.CTk):
             self.update_topic_count()
         asyncio.run_coroutine_threadsafe(load(), self.loop)
 
+    def _sender_query_changed(self, event):
+        if self.busy or event.keysym in ("Return", "Up", "Down", "Escape"):
+            return
+        if self.senders.get(self.sender_query.get()) == self.sender_id and self.sender_id is not None:
+            return
+        self.sender_generation += 1
+        self.sender_id = None
+        self.senders = {}
+        self.sender_query.configure(values=[])
+        self.sender_find.configure(state="normal" if self.channels else "disabled")
+        self.sender_filter.set(True)
+        self._update_sender_status()
+
+    def find_sender(self):
+        if self.busy or not self.channels:
+            return
+        query = self.sender_query.get().strip()
+        if query in self.senders:
+            self.choose_sender(query)
+            return
+        if not query:
+            self.sender_status.configure(text="Enter @username, a user ID, or a name to find")
+            return
+        self.sender_generation += 1
+        generation = self.sender_generation
+        selected = self.selected_channel()
+        self.sender_id = None
+        self.senders = {}
+        self.sender_filter.set(True)
+        self.sender_query.configure(values=[])
+        self.sender_find.configure(state="disabled")
+        self.sender_status.configure(text="Finding senders…")
+        self.start_btn.configure(state="disabled")
+
+        def apply(results, error):
+            if generation != self.sender_generation:
+                return
+            self.sender_find.configure(state="normal" if not self.busy else "disabled")
+            if error:
+                self.sender_status.configure(text="Could not find sender. Try @username or ID. Member search may be restricted.")
+                return
+            for entity in results:
+                name = (getattr(entity, "title", None)
+                        or " ".join(filter(None, (getattr(entity, "first_name", None),
+                                                 getattr(entity, "last_name", None)))) or "Sender")
+                username = getattr(entity, "username", None)
+                peer_id = utils.get_peer_id(entity)
+                label = f"{name}" + (f" (@{username})" if username else "") + f" [{peer_id}]"
+                self.senders[label] = peer_id
+            self.sender_query.configure(values=list(self.senders))
+            if len(self.senders) == 1:
+                self.choose_sender(next(iter(self.senders)))
+            else:
+                message = "No matching senders" if not self.senders else "Choose a sender from the arrow list (up to 30 matches)"
+                self.sender_status.configure(text=message)
+
+        async def lookup():
+            try:
+                matches = await self.downloader.find_senders(selected, query)
+                self.after(0, apply, matches, False)
+            except Exception:
+                self.after(0, apply, [], True)
+        asyncio.run_coroutine_threadsafe(lookup(), self.loop)
+
+    def choose_sender(self, label):
+        if self.busy or label not in self.senders:
+            return
+        self.sender_id = self.senders[label]
+        self.sender_query.set(label)
+        self.sender_filter.set(True)
+        self._update_sender_status()
+
+    def _update_sender_status(self):
+        if self.busy:
+            return
+        selected = self.sender_filter.get()
+        if not selected:
+            self.sender_generation += 1
+            self.sender_find.configure(state="normal" if self.channels else "disabled")
+        self.sender_status.configure(text=(f"Sender ID {self.sender_id}" if self.sender_id is not None
+                                           else "Find and choose a sender") if selected else "Everyone")
+        self.update_topic_count()
+
     def _render_transfer(self, details):
         previous = self._last_transfer
         self._last_transfer = details
@@ -974,6 +1092,12 @@ class App(ctk.CTk):
         if self.busy:
             return
         selected = self.selected_channel()
+        sender_id = self.sender_id if self.sender_filter.get() else None
+        if self.sender_filter.get() and sender_id is None:
+            self.progress_label.configure(text="Find and choose a sender, or uncheck the sender filter")
+            return
+        # Ignore any lookup still in flight while an unfiltered job starts.
+        self.sender_generation += 1
         topic_labels = dict(self.topics)
         topic_ids = [self.topics[label] for label, (var, _check) in self.topic_checks.items() if var.get()]
         topic_id = topic_ids[0] if topic_ids else None
@@ -1034,6 +1158,9 @@ class App(ctk.CTk):
         self.clear_topics_btn.configure(state="disabled")
         self.channel_search.configure(state="disabled")
         self.topic_search.configure(state="disabled")
+        self.sender_query.configure(state="disabled")
+        self.sender_toggle.configure(state="disabled")
+        self.sender_find.configure(state="disabled")
         for _var, check in self.topic_checks.values():
             check.configure(state="disabled")
         reverse = self.reverse.get()
@@ -1070,8 +1197,9 @@ class App(ctk.CTk):
                     if self.downloader.cancelled:
                         status = "cancelled"
                         break
-                    folder = os.path.join(base_folder, f"topic_{current_topic}") if current_topic is not None else base_folder
                     name = next((label for label, tid in topic_labels.items() if tid == current_topic), "")
+                    folder = (topic_folder(base_folder, name.rsplit(" [", 1)[0], selected.id, current_topic)
+                              if current_topic is not None else base_folder)
                     scope_name = (f"Topic {index + 1}/{len(topic_ids)} · {selected.name} / {name}"
                                   if current_topic is not None else f"Channel · {selected.name}")
                     self.after(0, lambda text=scope_name: self.transfer_scope.configure(text=text))
@@ -1085,7 +1213,7 @@ class App(ctk.CTk):
                     result = await self.downloader.download(
                         selected, folder, selected_type, limit_mode, custom_limit,
                         reverse, on_progress, self.log, done, topic_id=current_topic,
-                        reset_controls=False, cutoff_date=cutoff_date, on_transfer=on_transfer)
+                        reset_controls=False, cutoff_date=cutoff_date, on_transfer=on_transfer, sender_id=sender_id)
                     if result != "complete":
                         status = result
                         if result == "cancelled":
@@ -1094,6 +1222,10 @@ class App(ctk.CTk):
                     self.after(0, lambda: self.progress.set(1))
                 self.after(0, lambda: self.progress_label.configure(text=f"Download {status}"))
                 self.after(0, self._render_transfer, dict(totals, state=status))
+            except TopicFolderConflict:
+                self.log("❌ Topic folder conflict. Check the destination for duplicate topic IDs or files blocking a topic folder.")
+                self.after(0, lambda: self.progress_label.configure(text="Topic folder conflict · Check Activity"))
+                self.after(0, self._render_transfer, dict(totals, state="failed"))
             except Exception:
                 self.log("❌ Download failed. Check connection and local file permissions.")
                 self.after(0, lambda: self.progress_label.configure(text="Download failed"))
@@ -1109,6 +1241,9 @@ class App(ctk.CTk):
             self.select_topics_btn.configure(state="normal" if self.topics else "disabled")
             self.clear_topics_btn.configure(state="normal" if self.topics else "disabled")
             self.channel_search.configure(state="normal")
+            self.sender_query.configure(state="normal")
+            self.sender_toggle.configure(state="normal")
+            self.sender_find.configure(state="normal")
             self.topic_search.configure(state="normal" if self.topics else "disabled")
             for _var, check in self.topic_checks.values():
                 check.configure(state="normal")
