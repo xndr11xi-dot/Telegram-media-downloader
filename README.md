@@ -169,11 +169,37 @@ posted the forward, and anonymous/channel posts expose their group/channel
 identity rather than a hidden person's account. The first run for a new sender
 may scan the selected history before subsequent runs resume incrementally.
 
+## Channel post discussions
+
+Select a broadcast channel and enable **Include post discussions** in Download
+settings. This remembered option is off by default. It also downloads matching
+media from the comments on accessible channel posts, including nested replies
+and comments under text-only posts. It never joins a group automatically or
+downloads unrelated messages from the linked group. For ordinary groups and
+forum topics, replies are already part of their selected history.
+
+Comment media goes inside the channel folder under
+`discussions/group_<id>/thread_<id>/`. Channel posts and discussion groups use
+different message IDs, so their files and checkpoints stay separate. Album posts
+sharing a discussion reuse one thread folder. Filenames use each comment's own
+message date. Media types, sender and date filters apply to the comment itself,
+even when its parent post does not match those filters.
+
+Each run checks older channel posts for new comments; this can take longer than
+a channel-only run. Completed All scans resume each discussion independently for
+the selected media filter, sender and destination. Existing files are skipped.
+The channel's saved position does not prevent discovering comments on old posts.
+Enabling discussions does not require resetting saved sync.
+Posts are processed in the chosen order, followed by each post's discussion in
+that same order; this is not a single date-sorted list across all threads. The
+new-file limit is shared by channel and comment media. Activity reports discussion
+access failures and leaves unfinished sync positions available for retry.
+
 ## Rescan history and recover missing files
 
 Select a channel or group, then click Reset saved sync at the bottom of the
 Channels panel. The confirmation identifies the selected source. This clears
-its saved sync positions across all topics, senders, media filters and destination
+its saved sync positions across all topics, discussions, senders, media filters and destination
 folders. Other sources keep their saved positions. Reset is available while idle.
 
 After resetting, choose All, clear the optional date and click Start to rescan

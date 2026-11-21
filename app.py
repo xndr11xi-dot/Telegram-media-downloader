@@ -68,7 +68,8 @@ class App(ctk.CTk):
         self._restore_connection_details()
         self._restoring = False
         self._refresh_layout()
-        for variable in [self.folder_path, self.limit_mode, self.reverse, self.all_media, *self.media_checks.values()]:
+        for variable in [self.folder_path, self.limit_mode, self.reverse, self.all_media,
+                         self.include_discussions, *self.media_checks.values()]:
             variable.trace_add("write", self._queue_preferences)
         for entry in (self.custom_ext, self.custom_limit, self.cutoff_date):
             entry.bind("<KeyRelease>", self._queue_preferences, add="+")
@@ -205,6 +206,13 @@ class App(ctk.CTk):
         settings = self.settings_panel
         ctk.CTkLabel(settings, text="Download settings", font=ctk.CTkFont(size=14, weight="bold")).pack(
             anchor="w", padx=12, pady=(8, 4))
+        self.include_discussions = ctk.BooleanVar(value=False)
+        self.discussions_toggle = ctk.CTkCheckBox(settings, text="Include post discussions",
+            variable=self.include_discussions, state="disabled")
+        self.discussions_toggle.pack(anchor="w", padx=12, pady=(8, 4))
+        self.discussions_hint = ctk.CTkLabel(settings, text="Available for broadcast channels.",
+            wraplength=280, justify="left", anchor="w")
+        self.discussions_hint.pack(fill="x", padx=12, pady=(0, 8))
         self.sender_filter = ctk.BooleanVar(value=False)
         self.sender_toggle = ctk.CTkCheckBox(settings, text="Only selected sender", variable=self.sender_filter,
                                             command=self._update_sender_status)
@@ -401,7 +409,7 @@ class App(ctk.CTk):
         mode = saved.get("limit_mode")
         if mode in ("all", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
-        for name in ("reverse", "all_media", "remember_connection"):
+        for name in ("reverse", "all_media", "remember_connection", "include_discussions"):
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
         media = saved.get("media", {})
@@ -420,7 +428,7 @@ class App(ctk.CTk):
         self._preferences_job = None
         saved = {name: getattr(self, name).get() for name in (
             "folder_path", "custom_ext", "custom_limit", "cutoff_date",
-            "limit_mode", "reverse", "all_media", "remember_connection")}
+            "limit_mode", "reverse", "all_media", "remember_connection", "include_discussions")}
         saved["media"] = {name: variable.get() for name, variable in self.media_checks.items()}
         saved["pane_weights"] = self._pane_weights
         saved["split_weights"] = self._split_weights
@@ -677,7 +685,7 @@ class App(ctk.CTk):
         confirmed = messagebox.askyesno(
             "Reset saved sync?",
             f"{selected.name} [{selected.id}]\n\n"
-            "Clear this source's saved sync positions across all topics, senders, media filters and folders?\n\n"
+            "Clear this source's saved sync positions across all topics, discussions, senders, media filters and folders?\n\n"
             "Choose All and clear the date to rescan matching history on the next Start. "
             "Existing files will be skipped and missing files can be downloaded again.",
             parent=self, default="no")
@@ -801,6 +809,7 @@ class App(ctk.CTk):
             button.pack(fill="x", padx=4, pady=3)
             self.channel_buttons[channel.id] = button
         self.sync_reset_btn.configure(state="normal" if channels else "disabled")
+        self.discussions_toggle.configure(state="disabled")
         self.channel_search.configure(state="normal" if channels else "disabled",
             values=[f"{'📢' if c.is_channel else '👥'} {c.name} [{c.id}]" for c in channels])
         if channels:
@@ -944,6 +953,11 @@ class App(ctk.CTk):
         self.topic_count.configure(text="No topics selected")
         selected = self.selected_channel()
         self.source_title.configure(text=f"{selected.name} [{selected.id}]")
+        broadcast = bool(getattr(selected.entity, "broadcast", False))
+        self.discussions_toggle.configure(state="normal" if broadcast else "disabled")
+        self.discussions_hint.configure(text=(
+            "Includes comment media from linked groups. Older posts are checked for new replies."
+            if broadcast else "Available for broadcast channels. Group replies are already in their history."))
         for cid, button in self.channel_buttons.items():
             button.configure(fg_color=("#dbeafa", "#284667") if cid == selected.id else "transparent")
         self.start_btn.configure(state="disabled")
@@ -1121,6 +1135,8 @@ class App(ctk.CTk):
         if self.busy:
             return
         selected = self.selected_channel()
+        include_discussions = bool(self.include_discussions.get()
+                                   and getattr(selected.entity, "broadcast", False))
         sender_id = self.sender_id if self.sender_filter.get() else None
         if self.sender_filter.get() and sender_id is None:
             self.progress_label.configure(text="Find and choose a sender, or uncheck the sender filter")
@@ -1191,6 +1207,7 @@ class App(ctk.CTk):
         self.sender_query.configure(state="disabled")
         self.sender_toggle.configure(state="disabled")
         self.sender_find.configure(state="disabled")
+        self.discussions_toggle.configure(state="disabled")
         for _var, check in self.topic_checks.values():
             check.configure(state="disabled")
         reverse = self.reverse.get()
@@ -1243,7 +1260,8 @@ class App(ctk.CTk):
                     result = await self.downloader.download(
                         selected, folder, selected_type, limit_mode, custom_limit,
                         reverse, on_progress, self.log, done, topic_id=current_topic,
-                        reset_controls=False, cutoff_date=cutoff_date, on_transfer=on_transfer, sender_id=sender_id)
+                        reset_controls=False, cutoff_date=cutoff_date, on_transfer=on_transfer,
+                        sender_id=sender_id, include_discussions=include_discussions)
                     if result != "complete":
                         status = result
                         if result == "cancelled":
@@ -1275,6 +1293,8 @@ class App(ctk.CTk):
             self.sender_query.configure(state="normal")
             self.sender_toggle.configure(state="normal")
             self.sender_find.configure(state="normal")
+            self.discussions_toggle.configure(
+                state="normal" if getattr(selected.entity, "broadcast", False) else "disabled")
             self.topic_search.configure(state="normal" if self.topics else "disabled")
             for _var, check in self.topic_checks.values():
                 check.configure(state="normal")

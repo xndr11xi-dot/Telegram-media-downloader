@@ -1,4 +1,5 @@
 from telethon import TelegramClient, utils
+from telethon.tl.functions.messages import GetDiscussionMessageRequest
 try:
     # Telethon 1.45 / Telegram layer 214 moved forum discovery to messages.
     from telethon.tl.functions.messages import GetForumTopicsRequest
@@ -10,7 +11,7 @@ from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
     DocumentAttributeFilename,
-    User, Channel,
+    User, Channel, PeerChannel,
 )
 import asyncio
 import os
@@ -29,11 +30,14 @@ SYNC_FILE = "sync_state.json"
 class TopicFolderConflict(FileExistsError):
     pass
 
-def sync_key(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None):
+def sync_key(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None, discussion=None):
     filters = sorted(set(x.strip().lower() for x in (media_filter or "all").split(",")))
     scope = f"{channel_id}:topic:{topic_id}:filter:{','.join(filters)}"
     if sender_id is not None:
         scope += f":sender:{sender_id}"
+    if discussion is not None:
+        group_id, root_id = discussion
+        scope += f":discussion:{group_id}:thread:{root_id}"
     if folder is not None:
         destination = os.path.normcase(os.path.realpath(folder))
         scope += ":destination:" + hashlib.sha256(os.fsencode(destination)).hexdigest()
@@ -50,15 +54,15 @@ def message_in_topic(message, topic_id):
     return topic_id == 1
 
 
-def load_last_id(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None):
+def load_last_id(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None, discussion=None):
     data = read_json(SYNC_FILE, {})
-    value = data.get(sync_key(channel_id, topic_id, media_filter, folder, sender_id), 0)
+    value = data.get(sync_key(channel_id, topic_id, media_filter, folder, sender_id, discussion), 0)
     return value if type(value) is int and value >= 0 else 0
 
 
-def save_last_id(channel_id, message_id, topic_id=None, media_filter=None, folder=None, sender_id=None):
+def save_last_id(channel_id, message_id, topic_id=None, media_filter=None, folder=None, sender_id=None, discussion=None):
     data = read_json(SYNC_FILE, {})
-    key = sync_key(channel_id, topic_id, media_filter, folder, sender_id)
+    key = sync_key(channel_id, topic_id, media_filter, folder, sender_id, discussion)
     previous = data.get(key, 0)
     data[key] = max(previous if type(previous) is int else 0, message_id)
     write_json(SYNC_FILE, data)
@@ -82,6 +86,18 @@ def group_folder(base, name, channel_id):
     # Telegram titles cannot introduce path components or parent traversal.
     component = re.sub(r"[^\w .-]", "_", name).strip(" .")[:80] or "group"
     return os.path.join(base, f"{component}_{channel_id}")
+
+
+def discussion_folder(base, group_id, root_id):
+    for identifier in (group_id, root_id):
+        if type(identifier) is not int or identifier < 1:
+            raise ValueError("Invalid discussion identity")
+    for component in ("discussions", f"group_{group_id}", f"thread_{root_id}"):
+        base = os.path.join(base, component)
+        if os.path.islink(base):
+            raise ValueError("Discussion folders must not be symbolic links")
+        os.makedirs(base, exist_ok=True)
+    return base
 
 
 def topic_folder(base, title, channel_id, topic_id):
@@ -332,7 +348,7 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None):
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False):
         if sender_id is not None and (type(sender_id) is not int or sender_id == 0):
             raise ValueError("Select a valid sender ID")
         forum = bool(getattr(channel.entity, "forum", False))
@@ -390,47 +406,39 @@ class TelegramDownloader:
 
         notify("scanning")
 
-        # General uses ordinary history; other forum topics are reply threads.
-        scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
-        async for message in self.client.iter_messages(
-            channel.entity,
-            limit=None,
-            wait_time=0,
-            reverse=reverse,
-            min_id=last_id,
-            **scope
-        ):
+        include_discussions = bool(include_discussions and not forum
+                                   and getattr(channel.entity, "broadcast", False))
+        seen_discussions = set()
+        if include_discussions:
+            on_log("💬 Including post discussions. Checking older posts for new replies.")
+
+        async def ready():
             while self.paused and not self.cancelled:
                 await asyncio.sleep(0.5)
+            return not self.cancelled
 
-            if self.cancelled:
-                complete = False
-                on_log("⛔ Download cancelled.")
-                break
-
-            if not message_in_topic(message, topic_id):
-                continue
-            high_id = max(high_id, message.id)
+        async def process_media(message, destination_folder):
+            nonlocal count, skipped
             if sender_id is not None and getattr(message, "sender_id", None) != sender_id:
-                continue
+                return True
 
             if not message.media:
-                continue
+                return True
 
             if cutoff_date is not None:
                 day = message_day(message)
                 if day is None or (reverse and day < cutoff_date) or (not reverse and day > cutoff_date):
-                    continue
+                    return True
 
             # Check match first — no disk read
             if not self.matches_filter(message, media_filter):
-                continue
+                return True
 
             filename = media_filename(message)
-            destination = os.path.join(folder, filename)
+            destination = os.path.join(destination_folder, filename)
             if os.path.islink(destination):
                 raise ValueError("Download destination must not be a symbolic link")
-            legacy_destination = os.path.join(folder, legacy_media_filename(message))
+            legacy_destination = os.path.join(destination_folder, legacy_media_filename(message))
             if os.path.isfile(destination) or (
                 legacy_destination != destination
                 and not os.path.islink(legacy_destination)
@@ -439,7 +447,7 @@ class TelegramDownloader:
                 on_log(f"⏭ Already exists: {message.id}")
                 skipped += 1
                 notify("skipping", filename=filename)
-                continue
+                return True
 
             succeeded = False
             for attempt in range(5):
@@ -453,7 +461,7 @@ class TelegramDownloader:
                     transfer.report("starting", force=True)
                 try:
                     # Passing a stream prevents Telegram filenames from escaping the folder.
-                    fd, temporary = tempfile.mkstemp(prefix=".telegram-", suffix=".part", dir=folder)
+                    fd, temporary = tempfile.mkstemp(prefix=".telegram-", suffix=".part", dir=destination_folder)
                     with os.fdopen(fd, "wb") as output:
                         if transfer:
                             path = await message.download_media(file=output, progress_callback=transfer.update)
@@ -489,19 +497,100 @@ class TelegramDownloader:
                 finally:
                     if temporary is not None:
                         os.unlink(temporary)
-            if not succeeded:
-                complete = False
-                if not self.cancelled:
-                    on_log(f"❌ Could not download message {message.id}; sync not advanced.")
+            if not succeeded and not self.cancelled:
+                on_log(f"❌ Could not download message {message.id}; sync not advanced.")
+            return succeeded
 
-            if file_limit and count >= file_limit:
-                on_log(f"🎯 Reached target of {file_limit} files. Stopping.")
+        # Comments on old posts can be new, so their parent history is always checked.
+        # The ordinary channel checkpoint still governs only channel media.
+        scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
+        async for message in self.client.iter_messages(
+            channel.entity, limit=None, wait_time=0, reverse=reverse,
+            min_id=0 if include_discussions else last_id, **scope
+        ):
+            if not await ready():
+                complete = False
+                on_log("⛔ Download cancelled.")
                 break
+            if not message_in_topic(message, topic_id):
+                continue
+            high_id = max(high_id, message.id)
+            if message.id > last_id:
+                complete = await process_media(message, folder) and complete
+            if self.cancelled or (file_limit and count >= file_limit):
+                break
+
+            replies = getattr(message, "replies", None)
+            if not (include_discussions and getattr(replies, "comments", False)
+                    and getattr(replies, "replies", 0)):
+                continue
+            group_id = getattr(replies, "channel_id", None)
+            try:
+                if type(group_id) is not int or group_id < 1:
+                    raise ValueError("Missing discussion group")
+                if not await ready():
+                    break
+                notify("scanning", filename=f"Discussion for post {message.id}")
+                discussion = await self.client(GetDiscussionMessageRequest(
+                    peer=channel.entity, msg_id=message.id))
+                marked_group_id = utils.get_peer_id(PeerChannel(group_id))
+                group = next(c for c in discussion.chats if c.id == group_id)
+                # Telegram returns an album's initial messages newest first; the
+                # last is the thread root. Album posts must share one destination.
+                root = next(m for m in reversed(discussion.messages)
+                            if m.chat_id == marked_group_id)
+                identity = (group_id, root.id)
+                if identity in seen_discussions:
+                    continue
+                seen_discussions.add(identity)
+                target = discussion_folder(folder, *identity)
+                comment_last = load_last_id(channel.id, None, media_filter, target,
+                                            sender_id, identity) if use_checkpoint else 0
+                comment_high = comment_last
+                thread_complete = True
+                on_log(f"💬 Scanning discussion for post {message.id}.")
+                async for comment in self.client.iter_messages(
+                    group, reply_to=root.id, limit=None, wait_time=0,
+                    reverse=reverse, min_id=comment_last
+                ):
+                    if not await ready():
+                        thread_complete = False
+                        break
+                    if comment.id == root.id:
+                        continue
+                    reply = getattr(comment, "reply_to", None)
+                    thread_id = (getattr(reply, "reply_to_top_id", None)
+                                 or getattr(reply, "reply_to_msg_id", None))
+                    if comment.chat_id != marked_group_id or thread_id != root.id:
+                        thread_complete = False
+                        continue
+                    comment_high = max(comment_high, comment.id)
+                    thread_complete = await process_media(comment, target) and thread_complete
+                    if self.cancelled or (file_limit and count >= file_limit):
+                        break
+                if thread_complete and not self.cancelled and use_checkpoint:
+                    save_last_id(channel.id, comment_high, None, media_filter,
+                                 target, sender_id, identity)
+                if not thread_complete:
+                    complete = False
+                    on_log(f"Discussion for post {message.id} was incomplete; its sync was not advanced.")
+            except Exception:
+                # Access can differ between a channel and its linked group.
+                complete = False
+                on_log(f"⚠ Could not load discussion for post {message.id}. "
+                       "Check group access, connection and folder permissions; its sync was not advanced.")
+            if self.cancelled or (file_limit and count >= file_limit):
+                break
+
+        if file_limit and count >= file_limit:
+            on_log(f"🎯 Reached target of {file_limit} files. Stopping.")
+        if include_discussions and not seen_discussions and complete and not self.cancelled:
+            on_log("No post discussions with replies were found.")
 
         if complete and not self.cancelled and use_checkpoint:
             save_last_id(channel.id, high_id, topic_id, media_filter, folder, sender_id)
         if not complete or self.cancelled:
-            on_log("Download stopped without advancing sync.")
+            on_log("Download stopped; unfinished scopes kept their previous sync positions.")
         on_done(count, skipped)
         status = "cancelled" if self.cancelled else ("complete" if complete else "incomplete")
         notify("scope_" + status)
