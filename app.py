@@ -156,6 +156,8 @@ class App(ctk.CTk):
             state="disabled", command=self.choose_topic_from_dropdown)
         self.topic_search.set("")
         self.topic_search.grid(row=2, column=0, sticky="ew", padx=18, pady=4)
+        self.topic_search.bind("<KeyRelease>", self.filter_topics)
+        self.topic_search.bind("<Return>", self.choose_filtered_topic)
         actions = ctk.CTkFrame(self.topics_panel, fg_color="transparent")
         actions.grid(row=3, column=0, sticky="ew", padx=14, pady=8)
         self.select_topics_btn = ctk.CTkButton(actions, text="Select visible", width=115,
