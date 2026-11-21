@@ -52,8 +52,14 @@ python main.py
 The app automatically remembers your download folder, media selections, custom
 extensions, file limit, download order and date cutoff. Preferences are stored
 privately in the ignored preferences.local.json file beside the application.
-Authentication fields are excluded. Channel and topic selections are chosen
-after login.
+Connection details are saved separately when Remember connection details on this
+Mac is checked. After a successful login, the API ID, API hash and phone number
+are stored as plaintext in .telegram-downloader/credentials.json, with owner-only
+file permissions (600) inside a private directory (700). This directory is
+excluded from Git. The fields are filled on the next launch; click Log in to
+connect. Telegram codes are never saved. Forget saved details removes the file,
+clears the fields and disables remembering. Unchecking Remember also removes
+previously saved details. Channel and topic selections are chosen after login.
 
 Use Calendar beside the date field to select a day, navigate months, choose
 Today or clear the cutoff. The field also accepts YYYY-MM-DD directly. Calendar
@@ -87,7 +93,10 @@ Dates, order & custom types for the calendar, download order and custom extensio
 The current date and order remain visible in the settings summary. Preferences
 restore automatically, including settings in the collapsed section.
 
-At 1160 pixels or wider all three columns are visible. Medium windows keep the
+Drag the vertical dividers to set the width of each section. Widths and window
+size are saved automatically and restored on the next launch. Each section has
+a minimum width to keep controls accessible. Reset layout restores balanced
+section widths. At 1160 pixels or wider all three columns are visible. Medium windows keep the
 sidebar and switch between Topics and Settings. Below 880 pixels, the Channels,
 Topics and Settings switch shows one panel at a time. Resizing preserves inputs.
 The app follows the system's light or dark appearance.

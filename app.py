@@ -5,7 +5,10 @@ import threading
 import os
 import calendar
 from datetime import date, datetime, timezone
-from local_data import read_json, write_json
+from local_data import (
+    read_json, write_json, load_connection_details, save_connection_details,
+    forget_connection_details,
+)
 from downloader import TelegramDownloader, group_folder
 from history import load_history, save_history
 
@@ -28,12 +31,21 @@ class App(ctk.CTk):
         self.topics = {}
         self.topic_generation = 0
         self.busy = False
+        self._pane_weights = [1.0, 1.0, 1.0]
+        self._split_weights = [1.0, 1.0]
+        self._divider_drag = None
+        self._preferences_job = None
+        self._restoring = True
+        self._login_credentials = None
         self._build()
         self._preferences_job = None
         self._restore_preferences()
         self._update_limit_controls()
         self._show_custom_options()
         self._update_settings_summary()
+        self._restore_connection_details()
+        self._restoring = False
+        self._refresh_layout()
         for variable in [self.folder_path, self.limit_mode, self.reverse, self.all_media, *self.media_checks.values()]:
             variable.trace_add("write", self._queue_preferences)
         for entry in (self.custom_ext, self.custom_limit, self.cutoff_date):
@@ -56,6 +68,8 @@ class App(ctk.CTk):
         self.account_toggle = ctk.CTkButton(heading, text="Hide login", width=100,
                                           command=self.toggle_account)
         self.account_toggle.pack(side="right")
+        ctk.CTkButton(heading, text="Reset layout", width=100,
+                      command=self.reset_layout).pack(side="right", padx=8)
         self.account_fields = ctk.CTkFrame(account, fg_color="transparent")
         self.account_fields.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
         for column, (label, attr, placeholder) in enumerate([
@@ -82,22 +96,39 @@ class App(ctk.CTk):
         self.otp_btn.grid(row=0, column=2, padx=8)
         self.login_btn = ctk.CTkButton(login_row, text="Log in", width=100, command=self.login)
         self.login_btn.grid(row=0, column=3)
+        self.remember_connection = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(self.account_fields, text="Remember connection details on this Mac",
+            variable=self.remember_connection, command=self._connection_preference_changed).grid(row=2, column=0, columnspan=2,
+                sticky="w", padx=4, pady=(10, 0))
+        ctk.CTkButton(self.account_fields, text="Forget saved details", width=150,
+            command=self.forget_saved_connection).grid(row=2, column=2, sticky="e", padx=4, pady=(10, 0))
+        self.connection_status = ctk.CTkLabel(self.account_fields, text="", anchor="w")
+        self.connection_status.grid(row=3, column=0, columnspan=3, sticky="ew", padx=4)
         self._account_visible = True
 
         self.workspace = ctk.CTkFrame(self, fg_color="transparent")
         self.workspace.grid(row=1, column=0, sticky="nsew", padx=16, pady=6)
         self.workspace.grid_rowconfigure(1, weight=1)
+        self.dividers = []
+        for index in range(2):
+            divider = ctk.CTkFrame(self.workspace, width=8, corner_radius=0,
+                fg_color=("#d4dde7", "#3c495a"), cursor="sb_h_double_arrow")
+            divider.bind("<ButtonPress-1>", lambda event, i=index: self._begin_pane_resize(i, event))
+            divider.bind("<B1-Motion>", self._resize_panes)
+            divider.bind("<ButtonRelease-1>", self._end_pane_resize)
+            self.dividers.append(divider)
         self.pane_switch = ctk.CTkSegmentedButton(self.workspace,
             values=["Channels", "Topics", "Settings"], command=self.show_workspace_pane)
         self.pane_switch.set("Topics")
         self.channels_panel = ctk.CTkFrame(self.workspace, fg_color=sidebar)
+        self.channels_panel.grid_propagate(False)
         self.channels_panel.grid_columnconfigure(0, weight=1)
         self.channels_panel.grid_rowconfigure(2, weight=1)
         ctk.CTkLabel(self.channels_panel, text="Channels & groups",
                      font=ctk.CTkFont(size=14, weight="bold")).grid(
                          row=0, column=0, sticky="w", padx=12, pady=(12, 6))
         self.channel_var = ctk.StringVar()
-        self.channel_search = ctk.CTkComboBox(self.channels_panel, width=280,
+        self.channel_search = ctk.CTkComboBox(self.channels_panel, width=200,
             values=[], state="disabled", command=self.choose_channel_from_dropdown)
         self.channel_search.set("Log in to choose a channel")
         self.channel_search.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
@@ -111,6 +142,7 @@ class App(ctk.CTk):
         self.channel_hint.grid(row=3, column=0, sticky="ew", padx=12, pady=(4, 12))
 
         self.topics_panel = ctk.CTkFrame(self.workspace, fg_color=surface)
+        self.topics_panel.grid_propagate(False)
         self.topics_panel.grid_columnconfigure(0, weight=1)
         self.topics_panel.grid_rowconfigure(4, weight=1)
         self.source_title = ctk.CTkLabel(self.topics_panel, text="Your library", anchor="w",
@@ -286,6 +318,18 @@ class App(ctk.CTk):
             saved = read_json(self._preferences_path(), {})
         except (OSError, UnicodeError):
             saved = {}
+        for key, attr, count in (("pane_weights", "_pane_weights", 3),
+                                 ("split_weights", "_split_weights", 2)):
+            weights = saved.get(key)
+            if (isinstance(weights, list) and len(weights) == count
+                    and all(type(value) in (int, float) and 0 <= value <= 10000 for value in weights)
+                    and sum(weights) > 0):
+                setattr(self, attr, weights)
+        size = saved.get("window_size")
+        if isinstance(size, list) and len(size) == 2 and all(type(n) is int and n > 0 for n in size):
+            width = min(max(700, size[0]), self.winfo_screenwidth() - 80)
+            height = min(max(600, size[1]), self.winfo_screenheight() - 80)
+            self.geometry(f"{width}x{height}")
         for name in ("folder_path", "custom_ext", "custom_limit", "cutoff_date"):
             value = saved.get(name)
             if isinstance(value, str) and len(value) <= 4096:
@@ -298,7 +342,7 @@ class App(ctk.CTk):
         mode = saved.get("limit_mode")
         if mode in ("all", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
-        for name in ("reverse", "all_media"):
+        for name in ("reverse", "all_media", "remember_connection"):
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
         media = saved.get("media", {})
@@ -317,8 +361,11 @@ class App(ctk.CTk):
         self._preferences_job = None
         saved = {name: getattr(self, name).get() for name in (
             "folder_path", "custom_ext", "custom_limit", "cutoff_date",
-            "limit_mode", "reverse", "all_media")}
+            "limit_mode", "reverse", "all_media", "remember_connection")}
         saved["media"] = {name: variable.get() for name, variable in self.media_checks.items()}
+        saved["pane_weights"] = self._pane_weights
+        saved["split_weights"] = self._split_weights
+        saved["window_size"] = [self.winfo_width(), self.winfo_height()]
         try:
             write_json(self._preferences_path(), saved)
         except OSError:
@@ -407,43 +454,100 @@ class App(ctk.CTk):
     def _on_window_resize(self, event):
         if event.widget is self:
             self._refresh_layout()
+            if not self._restoring:
+                self._queue_preferences()
 
     def _refresh_layout(self):
         width = self.winfo_width()
         mode = "wide" if width >= 1160 else "split" if width >= 880 else "compact"
         self.progress_label.configure(wraplength=max(180, width - 500))
-        topic_width = 260 if mode == "wide" else width - 420 if mode == "split" else width - 110
-        channel_width = width - 740 if mode == "wide" else 290 if mode == "split" else width - 110
-        self.channel_hint.configure(wraplength=max(260, channel_width))
-        for label in (self.source_title, self.topic_status, self.topic_empty, self.topic_count):
-            label.configure(wraplength=max(240, topic_width))
-        if mode == self._layout_mode:
-            return
-        self._layout_mode = mode
-        for column in range(3):
-            self.workspace.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
-        for panel in (self.channels_panel, self.topics_panel, self.settings_panel):
-            panel.grid_remove()
-        if mode == "wide":
-            self.workspace.grid_columnconfigure(0, weight=1, minsize=340)
-            self.workspace.grid_columnconfigure(1, minsize=300)
-            self.workspace.grid_columnconfigure(2, minsize=355)
-            self.pane_switch.grid_remove()
-            for column, panel in enumerate((self.channels_panel, self.topics_panel, self.settings_panel)):
-                panel.grid(row=1, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
-        else:
-            panes = ["Topics", "Settings"] if mode == "split" else ["Channels", "Topics", "Settings"]
-            previous = self.pane_switch.get()
-            self.pane_switch.configure(values=panes)
-            self.pane_switch.set(previous if previous in panes else "Topics")
-            if mode == "split":
-                self.workspace.grid_columnconfigure(0, minsize=340)
-                self.workspace.grid_columnconfigure(1, weight=1)
-                self.channels_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        if mode != self._layout_mode:
+            self._layout_mode = mode
+            self._divider_drag = None
+            for panel in (self.channels_panel, self.topics_panel, self.settings_panel, *self.dividers):
+                panel.grid_remove()
+            if mode == "wide":
+                self.pane_switch.grid_remove()
+                for column, panel in zip((0, 2, 4), (self.channels_panel, self.topics_panel, self.settings_panel)):
+                    panel.grid(row=1, column=column, sticky="nsew")
+                for column, divider in zip((1, 3), self.dividers):
+                    divider.grid(row=1, column=column, sticky="ns", padx=2)
             else:
-                self.workspace.grid_columnconfigure(0, weight=1)
-            self.pane_switch.grid(row=0, column=1 if mode == "split" else 0, sticky="ew", pady=(0, 6))
-            self.show_workspace_pane(self.pane_switch.get())
+                panes = ["Topics", "Settings"] if mode == "split" else ["Channels", "Topics", "Settings"]
+                previous = self.pane_switch.get()
+                self.pane_switch.configure(values=panes)
+                self.pane_switch.set(previous if previous in panes else "Topics")
+                if mode == "split":
+                    self.channels_panel.grid(row=1, column=0, sticky="nsew")
+                    self.dividers[0].grid(row=1, column=1, sticky="ns", padx=2)
+                self.pane_switch.grid(row=0, column=2 if mode == "split" else 0, sticky="ew", pady=(0, 6))
+                self.show_workspace_pane(self.pane_switch.get())
+        for column in range(5):
+            self.workspace.grid_columnconfigure(column, weight=0, minsize=0, uniform="")
+        if mode == "wide":
+            self._pane_widths = self._fit_widths(width - 56, self._pane_weights, [280, 260, 340])
+            for column, size in zip((0, 2, 4), self._pane_widths):
+                self.workspace.grid_columnconfigure(column, minsize=size)
+            for column in (1, 3):
+                self.workspace.grid_columnconfigure(column, minsize=12)
+            channel_width, topic_width, _settings_width = self._pane_widths
+        elif mode == "split":
+            self._pane_widths = self._fit_widths(width - 44, self._split_weights, [280, 340])
+            self.workspace.grid_columnconfigure(0, minsize=self._pane_widths[0])
+            self.workspace.grid_columnconfigure(1, minsize=12)
+            self.workspace.grid_columnconfigure(2, minsize=self._pane_widths[1])
+            channel_width, topic_width = self._pane_widths
+        else:
+            self.workspace.grid_columnconfigure(0, weight=1)
+            channel_width = topic_width = width - 32
+        self.channel_hint.configure(wraplength=max(200, channel_width - 36))
+        for label in (self.source_title, self.topic_status, self.topic_empty, self.topic_count):
+            label.configure(wraplength=max(200, topic_width - 40))
+
+    @staticmethod
+    def _fit_widths(total, weights, minimums):
+        extra = max(0, total - sum(minimums))
+        weight_sum = sum(weights)
+        sizes = [minimum + int(extra * weight / weight_sum)
+                 for minimum, weight in zip(minimums, weights)]
+        sizes[-1] += max(0, total - sum(sizes))
+        return sizes
+
+    def _begin_pane_resize(self, index, event):
+        if self._layout_mode == "compact":
+            return
+        self._divider_drag = (self._layout_mode, index, event.x_root, self._pane_widths[:])
+
+    def _resize_panes(self, event):
+        if self._divider_drag is None:
+            return
+        mode, index, start, widths = self._divider_drag
+        if mode != self._layout_mode:
+            return
+        minimums = [280, 260, 340] if mode == "wide" else [280, 340]
+        delta = max(minimums[index] - widths[index],
+                    min(event.x_root - start, widths[index + 1] - minimums[index + 1]))
+        sizes = widths[:]
+        sizes[index] += delta
+        sizes[index + 1] -= delta
+        weights = [size - minimum for size, minimum in zip(sizes, minimums)]
+        if sum(weights) == 0:
+            return
+        if mode == "wide":
+            self._pane_weights = weights
+        else:
+            self._split_weights = weights
+        self._refresh_layout()
+
+    def _end_pane_resize(self, _event=None):
+        self._divider_drag = None
+        self._queue_preferences()
+
+    def reset_layout(self):
+        self._pane_weights = [1.0, 1.0, 1.0]
+        self._split_weights = [1.0, 1.0]
+        self._refresh_layout()
+        self._queue_preferences()
 
     def show_workspace_pane(self, pane):
         if self._layout_mode == "wide":
@@ -454,7 +558,53 @@ class App(ctk.CTk):
             self.channels_panel.grid_remove()
         panels = {"Channels": self.channels_panel, "Topics": self.topics_panel, "Settings": self.settings_panel}
         panel = panels.get(pane, self.topics_panel)
-        panel.grid(row=1, column=1 if self._layout_mode == "split" else 0, sticky="nsew", padx=0)
+        panel.grid(row=1, column=2 if self._layout_mode == "split" else 0, sticky="nsew")
+
+    def _restore_connection_details(self):
+        if not self.remember_connection.get():
+            return
+        try:
+            saved = load_connection_details()
+            if saved:
+                for name in ("api_id", "api_hash", "phone"):
+                    getattr(self, name).insert(0, saved[name])
+                self.connection_status.configure(text="Saved connection details loaded")
+        except (OSError, ValueError, UnicodeError):
+            self.connection_status.configure(text="Could not read saved connection details")
+
+    def _connection_preference_changed(self):
+        self._queue_preferences()
+        if self.remember_connection.get():
+            self.connection_status.configure(text="Details will be saved after a successful login")
+            return
+        try:
+            forget_connection_details()
+            self.connection_status.configure(text="Connection details will not be saved")
+        except (OSError, ValueError):
+            self.connection_status.configure(text="Could not remove saved connection details")
+
+    def _complete_authentication(self):
+        if self.remember_connection.get() and self._login_credentials is not None:
+            try:
+                save_connection_details(*self._login_credentials)
+                self.connection_status.configure(text="Connection details saved privately")
+            except (OSError, ValueError):
+                self.connection_status.configure(text="Could not save connection details")
+                self.log("Could not save connection details. Check local folder permissions.")
+        self._login_credentials = None
+        for name in ("api_id", "api_hash", "phone"):
+            getattr(self, name).delete(0, "end")
+
+    def forget_saved_connection(self):
+        try:
+            forget_connection_details()
+            self.remember_connection.set(False)
+            for name in ("api_id", "api_hash", "phone"):
+                getattr(self, name).delete(0, "end")
+            self.connection_status.configure(text="Saved connection details removed")
+            self._queue_preferences()
+        except (OSError, ValueError):
+            self.connection_status.configure(text="Could not remove saved connection details")
 
     def browse(self):
         folder = filedialog.askdirectory()
@@ -505,6 +655,7 @@ class App(ctk.CTk):
             self.loop.close()
             self.loop = None
             return
+        self._login_credentials = (api_id, api_hash, phone)
         self.after(0, lambda: self.login_btn.configure(state="disabled"))
         self.log("🔄 Connecting to Telegram...")
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
@@ -523,9 +674,7 @@ class App(ctk.CTk):
 
             self.log("✅ Logged in successfully!")
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
-            self.after(0, lambda: self.api_hash.delete(0, "end"))
-            self.after(0, lambda: self.phone.delete(0, "end"))
-            self.after(0, lambda: self.api_id.delete(0, "end"))
+            self.after(0, self._complete_authentication)
 
             channels = await self.downloader.get_channels()
             self.after(0, self._apply_channels, channels)
@@ -535,6 +684,7 @@ class App(ctk.CTk):
             self.log("❌ Login failed. Check credentials and account authentication settings.")
             self.after(0, lambda: self.login_btn.configure(state="normal"))
         finally:
+            self.after(0, lambda: setattr(self, "_login_credentials", None))
             self.downloader.otp_future = None
             self.after(0, lambda: self.otp.delete(0, "end"))
             self.after(0, lambda: self.otp_btn.configure(state="disabled"))
