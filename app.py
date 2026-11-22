@@ -69,7 +69,7 @@ class App(ctk.CTk):
         self._restoring = False
         self._refresh_layout()
         for variable in [self.folder_path, self.limit_mode, self.reverse, self.all_media,
-                         self.include_discussions, *self.media_checks.values()]:
+                         self.include_discussions, self.parallel_downloads, *self.media_checks.values()]:
             variable.trace_add("write", self._queue_preferences)
         for entry in (self.custom_ext, self.custom_limit, self.cutoff_date):
             entry.bind("<KeyRelease>", self._queue_preferences, add="+")
@@ -231,6 +231,13 @@ class App(ctk.CTk):
         self.sender_status = ctk.CTkLabel(settings, text="Everyone · Find @username, user ID or name",
                                          wraplength=280, justify="left", anchor="w")
         self.sender_status.pack(fill="x", padx=12, pady=(4, 8))
+        ctk.CTkLabel(settings, text="Parallel downloads").pack(anchor="w", padx=12, pady=(6, 0))
+        self.parallel_downloads = ctk.StringVar(value="2")
+        self.parallel_menu = ctk.CTkOptionMenu(settings, values=["1", "2", "3", "4"],
+                                              variable=self.parallel_downloads)
+        self.parallel_menu.pack(fill="x", padx=12, pady=(2, 4))
+        ctk.CTkLabel(settings, text="Files at once · Choose 1 for a single download",
+            wraplength=280, justify="left", anchor="w").pack(fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(settings, text="Media types").pack(anchor="w", padx=12, pady=(8, 0))
         quick_row = ctk.CTkFrame(settings, fg_color="transparent")
         quick_row.pack(fill="x", padx=8)
@@ -418,6 +425,9 @@ class App(ctk.CTk):
         mode = saved.get("limit_mode")
         if mode in ("all", "10", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
+        parallel = saved.get("parallel_downloads")
+        if parallel in ("1", "2", "3", "4"):
+            self.parallel_downloads.set(parallel)
         for name in ("reverse", "all_media", "remember_connection", "include_discussions"):
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
@@ -437,7 +447,8 @@ class App(ctk.CTk):
         self._preferences_job = None
         saved = {name: getattr(self, name).get() for name in (
             "folder_path", "custom_ext", "custom_limit", "cutoff_date",
-            "limit_mode", "reverse", "all_media", "remember_connection", "include_discussions")}
+            "limit_mode", "reverse", "all_media", "remember_connection", "include_discussions",
+            "parallel_downloads")}
         saved["media"] = {name: variable.get() for name, variable in self.media_checks.items()}
         saved["pane_weights"] = self._pane_weights
         saved["split_weights"] = self._split_weights
@@ -1112,6 +1123,7 @@ class App(ctk.CTk):
                   "downloading": "Downloading", "paused": "Paused", "resuming": "Resuming",
                   "cancelling": "Cancelling", "skipping": "Already downloaded",
                   "retrying": "Retrying file", "failed": "Download failed",
+                  "rate_limited": "Waiting for Telegram",
                   "file_complete": "File saved", "scope_complete": "Selected source complete",
                   "scope_cancelled": "Cancelled", "scope_incomplete": "Some files failed",
                   "complete": "Download complete", "cancelled": "Download cancelled",
@@ -1138,6 +1150,13 @@ class App(ctk.CTk):
         if details.get("attempt", 1) > 1:
             metrics += f"  |  Attempt {details['attempt']}/5"
         counts = f"{downloaded} downloaded · {skipped} skipped"
+        if "parallel_limit" in details:
+            combined = details.get("aggregate_speed", 0)
+            if state in ("paused", "resuming", "cancelling", "rate_limited", "cancelled",
+                         "complete", "incomplete", "scope_complete", "scope_cancelled", "scope_incomplete"):
+                combined = 0
+            counts += (f" · {details.get('active', 0)}/{details['parallel_limit']} active"
+                       f" · Combined {format_bytes(combined)}/s")
         self.transfer_metrics.configure(text=f"{metrics}\n{counts}")
         self.transfer_summary.configure(text=f"{metrics}  |  {counts}")
 
@@ -1145,6 +1164,11 @@ class App(ctk.CTk):
         if self.busy:
             return
         selected = self.selected_channel()
+        raw_parallel = self.parallel_downloads.get()
+        if raw_parallel not in ("1", "2", "3", "4"):
+            self.progress_label.configure(text="Choose 1–4 parallel downloads")
+            return
+        parallel_downloads = int(raw_parallel)
         include_discussions = bool(self.include_discussions.get()
                                    and getattr(selected.entity, "broadcast", False))
         sender_id = self.sender_id if self.sender_filter.get() else None
@@ -1218,6 +1242,7 @@ class App(ctk.CTk):
         self.sender_toggle.configure(state="disabled")
         self.sender_find.configure(state="disabled")
         self.discussions_toggle.configure(state="disabled")
+        self.parallel_menu.configure(state="disabled")
         for _var, check in self.topic_checks.values():
             check.configure(state="disabled")
         reverse = self.reverse.get()
@@ -1271,7 +1296,8 @@ class App(ctk.CTk):
                         selected, folder, selected_type, limit_mode, custom_limit,
                         reverse, on_progress, self.log, done, topic_id=current_topic,
                         reset_controls=False, cutoff_date=cutoff_date, on_transfer=on_transfer,
-                        sender_id=sender_id, include_discussions=include_discussions)
+                        sender_id=sender_id, include_discussions=include_discussions,
+                        parallel_downloads=parallel_downloads)
                     if result != "complete":
                         status = result
                         if result == "cancelled":
@@ -1303,6 +1329,7 @@ class App(ctk.CTk):
             self.sender_query.configure(state="normal")
             self.sender_toggle.configure(state="normal")
             self.sender_find.configure(state="normal")
+            self.parallel_menu.configure(state="normal")
             self.discussions_toggle.configure(
                 state="normal" if getattr(selected.entity, "broadcast", False) else "disabled")
             self.topic_search.configure(state="normal" if self.topics else "disabled")
