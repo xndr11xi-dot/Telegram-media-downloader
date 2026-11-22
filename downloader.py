@@ -1,4 +1,5 @@
 from telethon import TelegramClient, utils
+from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
 try:
     # Telethon 1.45 / Telegram layer 214 moved forum discovery to messages.
@@ -348,7 +349,9 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False):
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False, parallel_downloads=2):
+        if type(parallel_downloads) is not int or not 1 <= parallel_downloads <= 4:
+            raise ValueError("Choose between 1 and 4 parallel downloads")
         if sender_id is not None and (type(sender_id) is not int or sender_id == 0):
             raise ValueError("Select a valid sender ID")
         forum = bool(getattr(channel.entity, "forum", False))
@@ -374,6 +377,10 @@ class TelegramDownloader:
         count = 0
         skipped = 0
         last_skip_report = 0.0
+        pending = set()
+        reserved = set()
+        active = {}
+        cooldown_until = 0.0
 
         def notify(state, **details):
             nonlocal last_skip_report
@@ -384,8 +391,13 @@ class TelegramDownloader:
                 if now - last_skip_report < 0.25:
                     return
                 last_skip_report = now
+            aggregate = sum(item.get("speed", 0) for item in active.values()
+                            if item.get("state") == "downloading")
+            if self.paused or self.cancelled or time.monotonic() < cooldown_until:
+                aggregate = 0.0
             on_transfer(dict(state=state, downloaded=count, skipped=skipped,
-                             limit=file_limit, **details))
+                             limit=file_limit, active=len(active), parallel_limit=parallel_downloads,
+                             aggregate_speed=aggregate, **details))
 
         if file_limit is not None and (type(file_limit) is not int or file_limit < 1):
             raise ValueError("File limit must be positive")
@@ -419,11 +431,147 @@ class TelegramDownloader:
             on_log("💬 Including discussions only for channel messages in this download scope.")
 
         async def ready():
-            while self.paused and not self.cancelled:
-                await asyncio.sleep(0.5)
+            while not self.cancelled:
+                delay = cooldown_until - time.monotonic()
+                if not self.paused and delay <= 0:
+                    return True
+                await asyncio.sleep(min(0.1, delay) if delay > 0 else 0.5)
             return not self.cancelled
 
-        async def process_media(message, destination_folder):
+        def finish_thread(thread):
+            nonlocal complete
+            if (not thread["enumerated"] or thread["pending"] or thread["saved"]
+                    or not thread["complete"] or self.cancelled or not use_checkpoint):
+                return
+            try:
+                save_last_id(channel.id, thread["high"], None, media_filter,
+                             thread["folder"], sender_id, thread["identity"])
+                thread["saved"] = True
+            except Exception:
+                thread["complete"] = complete = False
+                on_log("Could not save discussion sync. It can be retried without skipping unfinished files.")
+
+        async def reap(wait=False):
+            nonlocal complete
+            if self.cancelled:
+                for task in pending:
+                    task.cancel()
+            if not pending:
+                return
+            done = {task for task in pending if task.done()}
+            if wait and not done:
+                done, _ = await asyncio.wait(pending, timeout=0.1,
+                                             return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                pending.remove(task)
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    complete = False
+                except Exception:
+                    complete = False
+                    on_log("A file could not be processed; unfinished sync was retained.")
+
+        async def watch_cancel():
+            # A timer keeps cancellation responsive even if a network read stalls.
+            tick = asyncio.Event()
+            while True:
+                if self.cancelled:
+                    for task in pending:
+                        task.cancel()
+                    return
+                try:
+                    await asyncio.wait_for(tick.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+
+        async def run_file(message, destination_folder, filename, destination, thread):
+            nonlocal complete
+            succeeded = False
+            try:
+                succeeded = await transfer_media(message, destination_folder, filename, destination)
+            finally:
+                if not succeeded:
+                    complete = False
+                    if thread is not None:
+                        thread["complete"] = False
+                reserved.discard(destination)
+                active.pop(destination, None)
+                if thread is not None:
+                    thread["pending"] -= 1
+                    finish_thread(thread)
+
+        async def transfer_media(message, destination_folder, filename, destination):
+            nonlocal count, cooldown_until
+            def emit_file(state, **details):
+                if state in ("file_complete", "failed"):
+                    active.pop(destination, None)
+                else:
+                    active[destination] = dict(state=state, **details)
+                notify(state, **details)
+
+            succeeded = False
+            for attempt in range(5):
+                if not await ready():
+                    break
+                temporary = None
+                transfer = _FileTransfer(self, filename, attempt + 1, emit_file)
+                transfer.report("starting", force=True)
+                async def progress(received, total):
+                    await transfer.update(received, total)
+                    if not await ready():
+                        raise _TransferCancelled()
+                try:
+                    fd, temporary = tempfile.mkstemp(prefix=".telegram-", suffix=".part", dir=destination_folder)
+                    with os.fdopen(fd, "wb") as output:
+                        if on_transfer:
+                            path = await message.download_media(file=output, progress_callback=progress)
+                        else:
+                            path = await message.download_media(file=output)
+                        if path:
+                            transfer.received = output.tell()
+                            transfer.total = transfer.received
+                    if not path:
+                        raise RuntimeError("Telegram returned no media")
+                    if not await ready():
+                        break
+                    if os.path.islink(destination):
+                        raise ValueError("Download destination must not be a symbolic link")
+                    os.replace(temporary, destination)
+                    temporary = None
+                    succeeded = True
+                    count += 1
+                    break
+                except _TransferCancelled:
+                    break
+                except FloodWaitError as error:
+                    seconds = max(0, int(error.seconds))
+                    cooldown_until = max(cooldown_until, time.monotonic() + seconds)
+                    for item in active.values():
+                        item["speed"] = 0.0
+                    transfer.report("rate_limited", force=True)
+                    on_log(f"Telegram requested a {seconds}s wait. Downloads will resume automatically.")
+                    if not await ready():
+                        break
+                except Exception:
+                    transfer.report("retrying" if attempt < 4 else "failed", force=True)
+                    on_log(f"⚠ Download attempt {attempt + 1} failed.")
+                    if attempt < 4 and not self.cancelled:
+                        await asyncio.sleep(1)
+                finally:
+                    if temporary is not None:
+                        os.unlink(temporary)
+            if succeeded:
+                # Reporting failures must never retry a file already committed.
+                transfer.report("file_complete", force=True)
+                fraction = 0.0 if not file_limit else min(count / file_limit, 1.0)
+                on_log(f"✅ [{count}/{file_limit or '∞'}] {filename}")
+                on_progress(count, skipped, fraction)
+            elif not self.cancelled:
+                on_log(f"❌ Could not download message {message.id}; sync not advanced.")
+            return succeeded
+
+        async def process_media(message, destination_folder, thread=None):
             nonlocal count, skipped
             if sender_id is not None and getattr(message, "sender_id", None) != sender_id:
                 return True
@@ -445,7 +593,7 @@ class TelegramDownloader:
             if os.path.islink(destination):
                 raise ValueError("Download destination must not be a symbolic link")
             legacy_destination = os.path.join(destination_folder, legacy_media_filename(message))
-            if os.path.isfile(destination) or (
+            if destination in reserved or os.path.isfile(destination) or (
                 legacy_destination != destination
                 and not os.path.islink(legacy_destination)
                 and os.path.isfile(legacy_destination)
@@ -455,152 +603,134 @@ class TelegramDownloader:
                 notify("skipping", filename=filename)
                 return True
 
-            succeeded = False
-            for attempt in range(5):
-                while self.paused and not self.cancelled:
-                    await asyncio.sleep(0.5)
-                if self.cancelled:
-                    break
-                temporary = None
-                transfer = _FileTransfer(self, filename, attempt + 1, notify) if on_transfer else None
-                if transfer:
-                    transfer.report("starting", force=True)
-                try:
-                    # Passing a stream prevents Telegram filenames from escaping the folder.
-                    fd, temporary = tempfile.mkstemp(prefix=".telegram-", suffix=".part", dir=destination_folder)
-                    with os.fdopen(fd, "wb") as output:
-                        if transfer:
-                            path = await message.download_media(file=output, progress_callback=transfer.update)
-                        else:
-                            path = await message.download_media(file=output)
-                        if transfer and path:
-                            transfer.received = output.tell()
-                            transfer.total = transfer.received
-                    if not path:
-                        raise RuntimeError("Telegram returned no media")
-                    if self.cancelled:
-                        break
-                    os.replace(temporary, destination)
-                    temporary = None
-                    succeeded = True
-                    count += 1
-                    if transfer:
-                        transfer.report("file_complete", force=True)
-                    fraction = 0.0 if not file_limit else min(count / file_limit, 1.0)
-                    on_log(f"✅ [{count}/{file_limit or '∞'}] {filename}")
-                    on_progress(count, skipped, fraction)
-                    await asyncio.sleep(1)
-                    break
-                except _TransferCancelled:
-                    break
-                except Exception:
-                    if transfer:
-                        transfer.report("retrying" if attempt < 4 else "failed", force=True)
-                    # Never log exception text: it may include request secrets or paths.
-                    on_log(f"⚠ Download attempt {attempt + 1} failed.")
-                    if attempt < 4 and not self.cancelled:
-                        await asyncio.sleep(1)
-                finally:
-                    if temporary is not None:
-                        os.unlink(temporary)
-            if not succeeded and not self.cancelled:
-                on_log(f"❌ Could not download message {message.id}; sync not advanced.")
-            return succeeded
-
-        # Discussion reads use the same parent window as this run. All mode resumes
-        # from the channel checkpoint instead of revisiting older channel history.
-        scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
-        if include_discussions and cutoff_date is not None:
-            # Jump directly to the inclusive date boundary instead of paging past
-            # newer/older posts. Keep a local check for Telegram's second precision.
-            try:
-                boundary = datetime.combine(cutoff_date, datetime.min.time(), tzinfo=timezone.utc)
-                boundary += timedelta(seconds=-1) if reverse else timedelta(days=1)
-                if 0 < boundary.timestamp() < 2**31:
-                    scope["offset_date"] = boundary
-            except OverflowError:
-                pass
-        async for message in self.client.iter_messages(
-            channel.entity, limit=parent_limit, wait_time=0, reverse=reverse,
-            min_id=last_id, **scope
-        ):
+            await reap()
+            while pending and (len(pending) >= parallel_downloads
+                               or (file_limit and count + len(pending) >= file_limit)):
+                await reap(wait=True)
             if not await ready():
-                complete = False
-                on_log("⛔ Download cancelled.")
-                break
-            if not message_in_topic(message, topic_id):
-                continue
-            if include_discussions and cutoff_date is not None:
-                day = message_day(message)
-                if day is None or (reverse and day < cutoff_date) or (not reverse and day > cutoff_date):
-                    continue
-            high_id = max(high_id, message.id)
-            if message.id > last_id:
-                complete = await process_media(message, folder) and complete
-            if self.cancelled or (file_limit and count >= file_limit):
-                break
+                return False
+            if file_limit and count >= file_limit:
+                return True
+            reserved.add(destination)
+            if thread is not None:
+                thread["pending"] += 1
+            pending.add(asyncio.create_task(run_file(
+                message, destination_folder, filename, destination, thread)))
+            return True
 
-            replies = getattr(message, "replies", None)
-            if not (include_discussions and getattr(replies, "comments", False)
-                    and getattr(replies, "replies", 0)):
-                continue
-            group_id = getattr(replies, "channel_id", None)
-            try:
-                if type(group_id) is not int or group_id < 1:
-                    raise ValueError("Missing discussion group")
+        async def scan():
+            nonlocal complete, high_id
+            # Discussion reads use the same parent window as this run. All mode resumes
+            # from the channel checkpoint instead of revisiting older channel history.
+            scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
+            if include_discussions and cutoff_date is not None:
+                # Jump directly to the inclusive date boundary instead of paging past
+                # newer/older posts. Keep a local check for Telegram's second precision.
+                try:
+                    boundary = datetime.combine(cutoff_date, datetime.min.time(), tzinfo=timezone.utc)
+                    boundary += timedelta(seconds=-1) if reverse else timedelta(days=1)
+                    if 0 < boundary.timestamp() < 2**31:
+                        scope["offset_date"] = boundary
+                except OverflowError:
+                    pass
+            async for message in self.client.iter_messages(
+                channel.entity, limit=parent_limit, wait_time=0, reverse=reverse,
+                min_id=last_id, **scope
+            ):
                 if not await ready():
-                    break
-                notify("scanning", filename=f"Discussion for post {message.id}")
-                discussion = await self.client(GetDiscussionMessageRequest(
-                    peer=channel.entity, msg_id=message.id))
-                marked_group_id = utils.get_peer_id(PeerChannel(group_id))
-                group = next(c for c in discussion.chats if c.id == group_id)
-                # Telegram returns an album's initial messages newest first; the
-                # last is the thread root. Album posts must share one destination.
-                root = next(m for m in reversed(discussion.messages)
-                            if m.chat_id == marked_group_id)
-                identity = (group_id, root.id)
-                if identity in seen_discussions:
-                    continue
-                seen_discussions.add(identity)
-                target = discussion_folder(folder, *identity)
-                comment_last = load_last_id(channel.id, None, media_filter, target,
-                                            sender_id, identity) if use_checkpoint else 0
-                comment_high = comment_last
-                thread_complete = True
-                on_log(f"💬 Scanning discussion for post {message.id}.")
-                async for comment in self.client.iter_messages(
-                    group, reply_to=root.id, limit=None, wait_time=0,
-                    reverse=reverse, min_id=comment_last
-                ):
-                    if not await ready():
-                        thread_complete = False
-                        break
-                    if comment.id == root.id:
-                        continue
-                    reply = getattr(comment, "reply_to", None)
-                    thread_id = (getattr(reply, "reply_to_top_id", None)
-                                 or getattr(reply, "reply_to_msg_id", None))
-                    if comment.chat_id != marked_group_id or thread_id != root.id:
-                        thread_complete = False
-                        continue
-                    comment_high = max(comment_high, comment.id)
-                    thread_complete = await process_media(comment, target) and thread_complete
-                    if self.cancelled or (file_limit and count >= file_limit):
-                        break
-                if thread_complete and not self.cancelled and use_checkpoint:
-                    save_last_id(channel.id, comment_high, None, media_filter,
-                                 target, sender_id, identity)
-                if not thread_complete:
                     complete = False
-                    on_log(f"Discussion for post {message.id} was incomplete; its sync was not advanced.")
-            except Exception:
-                # Access can differ between a channel and its linked group.
-                complete = False
-                on_log(f"⚠ Could not load discussion for post {message.id}. "
-                       "Check group access, connection and folder permissions; its sync was not advanced.")
-            if self.cancelled or (file_limit and count >= file_limit):
-                break
+                    on_log("⛔ Download cancelled.")
+                    break
+                if not message_in_topic(message, topic_id):
+                    continue
+                if include_discussions and cutoff_date is not None:
+                    day = message_day(message)
+                    if day is None or (reverse and day < cutoff_date) or (not reverse and day > cutoff_date):
+                        continue
+                high_id = max(high_id, message.id)
+                if message.id > last_id:
+                    complete = await process_media(message, folder) and complete
+                if self.cancelled or (file_limit and count >= file_limit):
+                    break
+
+                replies = getattr(message, "replies", None)
+                if not (include_discussions and getattr(replies, "comments", False)
+                        and getattr(replies, "replies", 0)):
+                    continue
+                group_id = getattr(replies, "channel_id", None)
+                thread = None
+                try:
+                    if type(group_id) is not int or group_id < 1:
+                        raise ValueError("Missing discussion group")
+                    if not await ready():
+                        break
+                    notify("scanning", filename=f"Discussion for post {message.id}")
+                    discussion = await self.client(GetDiscussionMessageRequest(
+                        peer=channel.entity, msg_id=message.id))
+                    marked_group_id = utils.get_peer_id(PeerChannel(group_id))
+                    group = next(c for c in discussion.chats if c.id == group_id)
+                    # Telegram returns an album's initial messages newest first; the
+                    # last is the thread root. Album posts must share one destination.
+                    root = next(m for m in reversed(discussion.messages)
+                                if m.chat_id == marked_group_id)
+                    identity = (group_id, root.id)
+                    if identity in seen_discussions:
+                        continue
+                    seen_discussions.add(identity)
+                    target = discussion_folder(folder, *identity)
+                    comment_last = load_last_id(channel.id, None, media_filter, target,
+                                                sender_id, identity) if use_checkpoint else 0
+                    comment_high = comment_last
+                    thread = dict(identity=identity, folder=target, high=comment_last,
+                                  complete=True, pending=0, enumerated=False, saved=False)
+                    on_log(f"💬 Scanning discussion for post {message.id}.")
+                    async for comment in self.client.iter_messages(
+                        group, reply_to=root.id, limit=None, wait_time=0,
+                        reverse=reverse, min_id=comment_last
+                    ):
+                        if not await ready():
+                            thread["complete"] = False
+                            break
+                        if comment.id == root.id:
+                            continue
+                        reply = getattr(comment, "reply_to", None)
+                        thread_id = (getattr(reply, "reply_to_top_id", None)
+                                     or getattr(reply, "reply_to_msg_id", None))
+                        if comment.chat_id != marked_group_id or thread_id != root.id:
+                            thread["complete"] = False
+                            continue
+                        comment_high = max(comment_high, comment.id)
+                        thread["high"] = comment_high
+                        thread["complete"] = await process_media(comment, target, thread) and thread["complete"]
+                        if self.cancelled or (file_limit and count >= file_limit):
+                            break
+                    thread["enumerated"] = True
+                    finish_thread(thread)
+                    if not thread["complete"]:
+                        complete = False
+                        on_log(f"Discussion for post {message.id} was incomplete; its sync was not advanced.")
+                except Exception:
+                    if thread is not None:
+                        thread["complete"] = False
+                        thread["enumerated"] = True
+                    # Access can differ between a channel and its linked group.
+                    complete = False
+                    on_log(f"⚠ Could not load discussion for post {message.id}. "
+                           "Check group access, connection and folder permissions; its sync was not advanced.")
+                if self.cancelled or (file_limit and count >= file_limit):
+                    break
+
+        watcher = asyncio.create_task(watch_cancel())
+        try:
+            await scan()
+            while pending:
+                await reap(wait=True)
+        finally:
+            watcher.cancel()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(watcher, *pending, return_exceptions=True)
+            pending.clear()
 
         if file_limit and count >= file_limit:
             on_log(f"🎯 Reached target of {file_limit} files. Stopping.")

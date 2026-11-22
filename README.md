@@ -8,6 +8,7 @@ A privacy-focused desktop app to bulk download media from your Telegram channels
 - Search forum topics and select one or more with checkboxes
 - 🗂 Combine file type checkboxes — Photos, Videos, Audio, PDF, Word, Excel, ZIP, or any custom extension
 - 🔢 Choose Last 10, 20, 50, 100, All, or a custom limit
+- ⚡ Download 1–4 files at once with a remembered parallel-download setting
 - 📅 Choose download order — Newest first or Oldest first
 - 📁 Browse and select your download folder
 - ⏸ Pause, resume, and cancel downloads anytime
@@ -50,7 +51,7 @@ python main.py
 ## Saved preferences
 
 The app automatically remembers your download folder, media selections, custom
-extensions, file limit, download order and date cutoff. Preferences are stored
+extensions, file limit, parallel downloads, download order and date cutoff. Preferences are stored
 privately in the ignored preferences.local.json file beside the application.
 Connection details are saved separately when Remember connection details on this
 Mac is checked. After a successful login, the API ID, API hash and phone number
@@ -111,6 +112,36 @@ show size unknown and no ETA. Speed is averaged over the current attempt,
 excluding paused time, and resets on retry. All mode scans without a known file
 total, so the main progress bar remains animated during scanning. Progress and the
 Start / Pause / Cancel controls stay available at the bottom.
+
+## Parallel downloads
+
+Choose **Parallel downloads** in Download settings. The default is **2** files at
+once; choose **1** for sequential transfers or **3–4** for more overlap. The app
+remembers the selection and locks it while a run is active. Parallelism is across
+files, using the same Telegram connection and download quality. It does not split
+one file into multiple downloads or create extra sessions.
+
+The queue selects files in the chosen order, but parallel files can finish in a
+different order. Each topic retains its own limit. Pending transfers reserve file
+limit slots so simultaneous completions cannot exceed a requested file count.
+Discussion limits still count parent channel messages, and only those messages'
+discussions are read. Existing and already queued files are skipped. The previous
+one-second wait after every successful file has been removed.
+
+Activity shows the latest file's bytes, progress and ETA plus the number of active
+files and their combined average speed. These are file-level estimates, not an ETA
+for the whole channel. Pause applies to all transfers; Cancel stops active transfers
+and removes their partial files. Sync advances only after the relevant history
+scan and transfers succeed. Completed discussions can save their own checkpoint
+while another discussion is still downloading or has failed.
+
+Telegram-requested waits reported by file transfers pause new starts and retries
+for the requested duration; Activity reports Waiting for Telegram. Cancel also
+interrupts these waits. Retryable errors retain the existing five-attempt limit.
+Speed depends on file sizes, connection, disk/CPU and Telegram's limits, so more
+parallel files do not guarantee faster downloads. See the
+[Telethon FAQ](https://docs.telethon.dev/en/stable/quick-references/faq.html#file-download-is-slow-or-sending-files-takes-too-long)
+for Telegram download performance considerations.
 
 ## Privacy
 
@@ -202,8 +233,9 @@ scans retain independent discussion checkpoints for each filter, sender and
 destination. Numbered or date-restricted runs do not advance unrestricted sync.
 Existing files are skipped in every mode.
 
-Posts follow the selected order, each followed by its discussion in that same
-order; comments across all threads are not globally sorted by date. Activity
+Posts and their discussions are queued in the selected order; parallel file
+transfers can finish in a different order. Comments across all threads are not
+globally sorted by date. Activity
 reports discussion access failures and retains unfinished sync positions for retry.
 
 ## Rescan history and recover missing files
