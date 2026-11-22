@@ -7,7 +7,7 @@ A privacy-focused desktop app to bulk download media from your Telegram channels
 - 📢 Search and select channels or groups you are a member of
 - Search forum topics and select one or more with checkboxes
 - 🗂 Combine file type checkboxes — Photos, Videos, Audio, PDF, Word, Excel, ZIP, or any custom extension
-- 🔢 Control how many files — Last 20, 50, 100, All, or custom number
+- 🔢 Choose Last 10, 20, 50, 100, All, or a custom limit
 - 📅 Choose download order — Newest first or Oldest first
 - 📁 Browse and select your download folder
 - ⏸ Pause, resume, and cancel downloads anytime
@@ -44,7 +44,7 @@ python main.py
 2. Enter your API ID, API Hash and phone number
 3. Click **Login** — enter the OTP sent to your Telegram app
 4. Search and select a channel or group in the left panel
-5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel).
+5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel). With Include post discussions enabled, the limit counts channel messages and includes their matching comment media.
 6. Click **Start**
 
 ## Saved preferences
@@ -131,7 +131,12 @@ MIT License
 
 For forum-enabled supergroups, choose one or more topics after selecting the group. Topic
 names include their IDs so duplicate titles remain distinguishable. Downloads
-are saved under `topic_<id>` inside the group folder and history records the topic.
+are saved under a sanitized topic name plus its ID, such as `Photography_12345`,
+inside the group folder. History records the topic.
+Existing `topic_<id>` folders are renamed on the next download and their sync
+checkpoints migrate with them. Files are retained. Later topic-title changes
+reuse the existing folder by ID. If multiple folders already share a topic ID,
+the app reports a conflict so you can review them before downloading.
 Ordinary channels and groups keep their existing behavior.
 
 Topic matching uses Telegram's `forum_topic`, `reply_to_top_id`, and
@@ -143,6 +148,76 @@ whole-group download when topic loading fails.
 Topic sync checkpoints are independent of whole-group checkpoints and of other
 topics and media filters. Only a completed All scan advances the checkpoint;
 cancelled or failed scans can be retried without skipping unfinished files.
+
+## Download from a specific sender
+
+In Download settings, use the sender field and Find. Enter an @username, a numeric
+Telegram sender ID, or a name to search the selected group's members. For multiple
+matches, select the intended sender from the dropdown; IDs distinguish duplicate
+names. Numeric IDs can be used directly without loading a sender profile.
+
+Only selected sender combines with the chosen topics, media types, file limit,
+date and download order. Uncheck it to include Everyone. Sender choices reset
+when changing channels/groups. Sender-filtered incremental checkpoints are
+independent from Everyone and from other senders; existing matching files in the
+same destination are still skipped.
+
+Member-name search depends on Telegram's permissions and may be unavailable.
+Username and numeric-ID input provide other ways to choose a sender. Filtering
+uses the sender identity attached to the message. Forwards match the account that
+posted the forward, and anonymous/channel posts expose their group/channel
+identity rather than a hidden person's account. The first run for a new sender
+may scan the selected history before subsequent runs resume incrementally.
+
+## Channel post discussions
+
+Select a broadcast channel and enable **Include post discussions** in Download
+settings. This remembered option is off by default. It also downloads matching
+media from the comments on accessible channel posts, including nested replies
+and comments under text-only posts. It never joins a group automatically or
+downloads unrelated messages from the linked group. For ordinary groups and
+forum topics, replies are already part of their selected history.
+
+Comment media goes inside the channel folder under
+`discussions/group_<id>/thread_<id>/`. Channel posts and discussion groups use
+different message IDs, so their files and checkpoints stay separate. Album posts
+sharing a discussion reuse one thread folder. Filenames use each comment's own
+message date. Media types and sender filters apply to the comment itself,
+including text-only parents or parents from a different sender. Date restrictions
+bound the parent-message window and also filter each comment by its own date.
+
+With discussions enabled, the limit counts **channel messages**, including those
+without matching media. For example, **Last 10** with newest-first order processes
+the latest ten channel messages and all matching comment media from those messages.
+Comment files do not use up the message limit. Existing or filtered-out files do
+not extend the window to older posts. Oldest-first order uses the first N messages
+in that direction. A date restriction starts the window at that date boundary.
+Without discussions, limits retain their usual meaning: the number of new files.
+
+**All new messages** uses the saved channel position and processes discussions
+only on channel messages included in that run. It does not recheck older posts for
+new replies. To revisit recent discussions, choose a numbered window; to rescan
+the whole history, use Reset saved sync and All with no date cutoff. Completed All
+scans retain independent discussion checkpoints for each filter, sender and
+destination. Numbered or date-restricted runs do not advance unrestricted sync.
+Existing files are skipped in every mode.
+
+Posts follow the selected order, each followed by its discussion in that same
+order; comments across all threads are not globally sorted by date. Activity
+reports discussion access failures and retains unfinished sync positions for retry.
+
+## Rescan history and recover missing files
+
+Select a channel or group, then click Reset saved sync at the bottom of the
+Channels panel. The confirmation identifies the selected source. This clears
+its saved sync positions across all topics, discussions, senders, media filters and destination
+folders. Other sources keep their saved positions. Reset is available while idle.
+
+After resetting, choose All, clear the optional date and click Start to rescan
+history using the current topic, sender and media selections. Files still present
+in the destination are skipped, and missing matching files are downloaded again.
+A completed run establishes a new checkpoint. Activity history remains a separate
+record of previous runs.
 
 ## Security and compatibility
 
