@@ -20,7 +20,7 @@ import hashlib
 import re
 import tempfile
 import time
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from local_data import read_json, write_json
 
 # ── Incremental sync ──
@@ -360,6 +360,8 @@ class TelegramDownloader:
             self.paused = False
             self.cancelled = False
         os.makedirs(folder, exist_ok=True)
+        include_discussions = bool(include_discussions and not forum
+                                   and getattr(channel.entity, "broadcast", False))
 
         # ── File limit ──
         if limit_mode == "all":
@@ -387,13 +389,19 @@ class TelegramDownloader:
 
         if file_limit is not None and (type(file_limit) is not int or file_limit < 1):
             raise ValueError("File limit must be positive")
+        # A discussion window counts parent messages, never files from their replies.
+        parent_limit = file_limit if include_discussions else None
+        if include_discussions:
+            file_limit = None
 
         # A restricted date scan must not change or depend on the unrestricted checkpoint.
         use_checkpoint = limit_mode == "all" and cutoff_date is None
         last_id = load_last_id(channel.id, topic_id, media_filter, folder, sender_id) if use_checkpoint else 0
         high_id = last_id
         complete = True
-        if last_id:
+        if include_discussions and parent_limit:
+            on_log(f"🔍 Scanning up to {parent_limit} channel messages and their discussions...")
+        elif last_id:
             on_log(f"🔄 Resuming from message ID {last_id}...")
         else:
             on_log(f"🔍 Scanning for {file_limit or 'all'} matching files...")
@@ -406,11 +414,9 @@ class TelegramDownloader:
 
         notify("scanning")
 
-        include_discussions = bool(include_discussions and not forum
-                                   and getattr(channel.entity, "broadcast", False))
         seen_discussions = set()
         if include_discussions:
-            on_log("💬 Including post discussions. Checking older posts for new replies.")
+            on_log("💬 Including discussions only for channel messages in this download scope.")
 
         async def ready():
             while self.paused and not self.cancelled:
@@ -501,12 +507,22 @@ class TelegramDownloader:
                 on_log(f"❌ Could not download message {message.id}; sync not advanced.")
             return succeeded
 
-        # Comments on old posts can be new, so their parent history is always checked.
-        # The ordinary channel checkpoint still governs only channel media.
+        # Discussion reads use the same parent window as this run. All mode resumes
+        # from the channel checkpoint instead of revisiting older channel history.
         scope = {"reply_to": topic_id} if forum and topic_id != 1 else {}
+        if include_discussions and cutoff_date is not None:
+            # Jump directly to the inclusive date boundary instead of paging past
+            # newer/older posts. Keep a local check for Telegram's second precision.
+            try:
+                boundary = datetime.combine(cutoff_date, datetime.min.time(), tzinfo=timezone.utc)
+                boundary += timedelta(seconds=-1) if reverse else timedelta(days=1)
+                if 0 < boundary.timestamp() < 2**31:
+                    scope["offset_date"] = boundary
+            except OverflowError:
+                pass
         async for message in self.client.iter_messages(
-            channel.entity, limit=None, wait_time=0, reverse=reverse,
-            min_id=0 if include_discussions else last_id, **scope
+            channel.entity, limit=parent_limit, wait_time=0, reverse=reverse,
+            min_id=last_id, **scope
         ):
             if not await ready():
                 complete = False
@@ -514,6 +530,10 @@ class TelegramDownloader:
                 break
             if not message_in_topic(message, topic_id):
                 continue
+            if include_discussions and cutoff_date is not None:
+                day = message_day(message)
+                if day is None or (reverse and day < cutoff_date) or (not reverse and day > cutoff_date):
+                    continue
             high_id = max(high_id, message.id)
             if message.id > last_id:
                 complete = await process_media(message, folder) and complete
@@ -585,7 +605,7 @@ class TelegramDownloader:
         if file_limit and count >= file_limit:
             on_log(f"🎯 Reached target of {file_limit} files. Stopping.")
         if include_discussions and not seen_discussions and complete and not self.cancelled:
-            on_log("No post discussions with replies were found.")
+            on_log("No post discussions with replies were found in this download scope.")
 
         if complete and not self.cancelled and use_checkpoint:
             save_last_id(channel.id, high_id, topic_id, media_filter, folder, sender_id)

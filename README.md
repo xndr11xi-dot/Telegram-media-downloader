@@ -7,7 +7,7 @@ A privacy-focused desktop app to bulk download media from your Telegram channels
 - 📢 Search and select channels or groups you are a member of
 - Search forum topics and select one or more with checkboxes
 - 🗂 Combine file type checkboxes — Photos, Videos, Audio, PDF, Word, Excel, ZIP, or any custom extension
-- 🔢 Control how many files — Last 20, 50, 100, All, or custom number
+- 🔢 Choose Last 10, 20, 50, 100, All, or a custom limit
 - 📅 Choose download order — Newest first or Oldest first
 - 📁 Browse and select your download folder
 - ⏸ Pause, resume, and cancel downloads anytime
@@ -44,7 +44,7 @@ python main.py
 2. Enter your API ID, API Hash and phone number
 3. Click **Login** — enter the OTP sent to your Telegram app
 4. Search and select a channel or group in the left panel
-5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel).
+5. For forums, select one or more topics. Choose media type checkboxes and how many new files to download per topic (or per regular channel). With Include post discussions enabled, the limit counts channel messages and includes their matching comment media.
 6. Click **Start**
 
 ## Saved preferences
@@ -182,18 +182,29 @@ Comment media goes inside the channel folder under
 `discussions/group_<id>/thread_<id>/`. Channel posts and discussion groups use
 different message IDs, so their files and checkpoints stay separate. Album posts
 sharing a discussion reuse one thread folder. Filenames use each comment's own
-message date. Media types, sender and date filters apply to the comment itself,
-even when its parent post does not match those filters.
+message date. Media types and sender filters apply to the comment itself,
+including text-only parents or parents from a different sender. Date restrictions
+bound the parent-message window and also filter each comment by its own date.
 
-Each run checks older channel posts for new comments; this can take longer than
-a channel-only run. Completed All scans resume each discussion independently for
-the selected media filter, sender and destination. Existing files are skipped.
-The channel's saved position does not prevent discovering comments on old posts.
-Enabling discussions does not require resetting saved sync.
-Posts are processed in the chosen order, followed by each post's discussion in
-that same order; this is not a single date-sorted list across all threads. The
-new-file limit is shared by channel and comment media. Activity reports discussion
-access failures and leaves unfinished sync positions available for retry.
+With discussions enabled, the limit counts **channel messages**, including those
+without matching media. For example, **Last 10** with newest-first order processes
+the latest ten channel messages and all matching comment media from those messages.
+Comment files do not use up the message limit. Existing or filtered-out files do
+not extend the window to older posts. Oldest-first order uses the first N messages
+in that direction. A date restriction starts the window at that date boundary.
+Without discussions, limits retain their usual meaning: the number of new files.
+
+**All new messages** uses the saved channel position and processes discussions
+only on channel messages included in that run. It does not recheck older posts for
+new replies. To revisit recent discussions, choose a numbered window; to rescan
+the whole history, use Reset saved sync and All with no date cutoff. Completed All
+scans retain independent discussion checkpoints for each filter, sender and
+destination. Numbered or date-restricted runs do not advance unrestricted sync.
+Existing files are skipped in every mode.
+
+Posts follow the selected order, each followed by its discussion in that same
+order; comments across all threads are not globally sorted by date. Activity
+reports discussion access failures and retains unfinished sync positions for retry.
 
 ## Rescan history and recover missing files
 

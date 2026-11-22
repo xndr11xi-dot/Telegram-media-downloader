@@ -208,7 +208,7 @@ class App(ctk.CTk):
             anchor="w", padx=12, pady=(8, 4))
         self.include_discussions = ctk.BooleanVar(value=False)
         self.discussions_toggle = ctk.CTkCheckBox(settings, text="Include post discussions",
-            variable=self.include_discussions, state="disabled")
+            variable=self.include_discussions, state="disabled", command=self._update_limit_controls)
         self.discussions_toggle.pack(anchor="w", padx=12, pady=(8, 4))
         self.discussions_hint = ctk.CTkLabel(settings, text="Available for broadcast channels.",
             wraplength=280, justify="left", anchor="w")
@@ -249,10 +249,11 @@ class App(ctk.CTk):
         self.all_media = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(settings, text="All media types", variable=self.all_media).pack(
             anchor="w", padx=12, pady=(6, 12))
-        ctk.CTkLabel(settings, text="New files per topic / channel").pack(anchor="w", padx=12)
+        self.limit_label = ctk.CTkLabel(settings, text="New files per topic / channel")
+        self.limit_label.pack(anchor="w", padx=12)
         self.limit_mode = ctk.StringVar(value="all")
         self.limit_menu = ctk.CTkOptionMenu(settings,
-            values=["All new files", "Last 20", "Last 50", "Last 100", "Custom number"],
+            values=["All new files", "Last 10", "Last 20", "Last 50", "Last 100", "Custom number"],
             command=self._choose_limit)
         self.limit_menu.pack(fill="x", padx=12, pady=(2, 8))
         self.custom_limit = ctk.CTkEntry(settings, placeholder_text="Number of files, e.g. 23")
@@ -344,12 +345,20 @@ class App(ctk.CTk):
         self.after_idle(self._refresh_layout)
 
     def _choose_limit(self, label):
-        modes = {"All new files": "all", "Last 20": "20", "Last 50": "50",
+        modes = {"All new files": "all", "All new messages": "all",
+                 "Last 10": "10", "Last 20": "20", "Last 50": "50",
                  "Last 100": "100", "Custom number": "custom"}
         self.limit_mode.set(modes[label])
 
     def _update_limit_controls(self):
-        labels = {"all": "All new files", "20": "Last 20", "50": "Last 50",
+        discussions = bool(self.channels and self.include_discussions.get()
+                           and getattr(self.selected_channel().entity, "broadcast", False))
+        all_label = "All new messages" if discussions else "All new files"
+        self.limit_label.configure(text="Channel messages per run" if discussions else "New files per topic / channel")
+        self.custom_limit.configure(placeholder_text=("Number of messages, e.g. 10" if discussions
+                                                     else "Number of files, e.g. 10"))
+        self.limit_menu.configure(values=[all_label, "Last 10", "Last 20", "Last 50", "Last 100", "Custom number"])
+        labels = {"all": all_label, "10": "Last 10", "20": "Last 20", "50": "Last 50",
                   "100": "Last 100", "custom": "Custom number"}
         self.limit_menu.set(labels[self.limit_mode.get()])
         if self.limit_mode.get() == "custom":
@@ -407,7 +416,7 @@ class App(ctk.CTk):
                     widget.delete(0, "end")
                     widget.insert(0, value)
         mode = saved.get("limit_mode")
-        if mode in ("all", "20", "50", "100", "custom"):
+        if mode in ("all", "10", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
         for name in ("reverse", "all_media", "remember_connection", "include_discussions"):
             if type(saved.get(name)) is bool:
@@ -956,8 +965,9 @@ class App(ctk.CTk):
         broadcast = bool(getattr(selected.entity, "broadcast", False))
         self.discussions_toggle.configure(state="normal" if broadcast else "disabled")
         self.discussions_hint.configure(text=(
-            "Includes comment media from linked groups. Older posts are checked for new replies."
+            "Includes comment media only for this run's channel messages. Comments do not count toward the message limit."
             if broadcast else "Available for broadcast channels. Group replies are already in their history."))
+        self._update_limit_controls()
         for cid, button in self.channel_buttons.items():
             button.configure(fg_color=("#dbeafa", "#284667") if cid == selected.id else "transparent")
         self.start_btn.configure(state="disabled")
@@ -1165,7 +1175,7 @@ class App(ctk.CTk):
         limit_mode = self.limit_mode.get()
         raw_limit = self.custom_limit.get().strip()
         if limit_mode == "custom" and (not raw_limit.isdecimal() or int(raw_limit) < 1):
-            self.log("Enter a positive number of files per topic.")
+            self.log("Enter a positive number for the download scope.")
             return
         custom_limit = int(raw_limit) if limit_mode == "custom" else 20
         if not self.folder_path.get().strip():
@@ -1211,7 +1221,7 @@ class App(ctk.CTk):
         for _var, check in self.topic_checks.values():
             check.configure(state="disabled")
         reverse = self.reverse.get()
-        if limit_mode == "all":
+        if limit_mode == "all" or include_discussions:
             self.progress.configure(mode="indeterminate")
             self.progress.start()
         self.after(0, lambda: self.progress.set(0))
