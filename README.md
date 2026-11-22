@@ -143,6 +143,40 @@ parallel files do not guarantee faster downloads. See the
 [Telethon FAQ](https://docs.telethon.dev/en/stable/quick-references/faq.html#file-download-is-slow-or-sending-files-takes-too-long)
 for Telegram download performance considerations.
 
+## Private issue diagnostics
+
+The Activity Log remains an on-screen record for the current run. Separate private
+diagnostics are now started by `main.py` and persist errors across app restarts.
+Open **Activity → Log → Open diagnostics** to reveal the log folder in Finder
+(or the platform's file manager).
+
+The files live under `.telegram-downloader/diagnostics/`, which is ignored by Git.
+`issues.log` rotates at 256 KiB, keeping three backups (`issues.log.1` through
+`.3`), for about 1 MiB total. Directories use mode 700 and files mode 600 on macOS.
+No new dependencies, uploads, analytics or external issue reports are added.
+
+Diagnostics cover handled login/topic/sender/download/storage failures, transfer
+retries and Telegram waits, plus unhandled Python, GUI callback, background-thread
+and asynchronous-task errors. They contain UTC timestamps, fixed event codes,
+error types, application source filenames/line numbers, Python/library versions,
+generic OS name and limited operational counts. They omit raw exception messages,
+traceback source text/locals, full filesystem paths, credentials, phone numbers,
+OTPs, session contents, account/channel/sender/message IDs, titles and media names.
+Activity text and download history are not copied into these files.
+
+A small private per-run marker tracks whether the window closed normally. The
+next launch checks for leftover markers from processes no longer running and
+records a notice. Force Quit, shutdown and native crashes can all cause this notice;
+it is evidence of an interrupted run, not proof of a particular bug. Forced exits
+cannot always execute Python error handlers, so the exact cause may be unavailable.
+Live markers from another running instance are left alone. Closing the window
+during an active download is recorded separately as an intentional close.
+
+If diagnostic storage cannot be opened, the app continues and displays a local
+permissions notice. Logging failures do not expose raw exception contents or
+prevent ordinary app use. No diagnostics are initialized merely by importing
+modules for tests or other tools.
+
 ## Privacy
 
 - All data stays on your machine

@@ -12,6 +12,7 @@ from local_data import (
 from downloader import TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync
 from telethon import utils
 from history import load_history, save_history
+from diagnostics import record_issue, observe_future, async_exception_handler, open_diagnostics_folder
 
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
@@ -53,6 +54,7 @@ class App(ctk.CTk):
         self.topics = {}
         self.topic_generation = 0
         self.busy = False
+        self._normal_close_requested = False
         self._pane_weights = [1.0, 1.0, 1.0]
         self._split_weights = [1.0, 1.0]
         self._divider_drag = None
@@ -319,6 +321,12 @@ class App(ctk.CTk):
         self._last_transfer = {}
         self.activity_tabs.add("Log")
         self.activity_tabs.add("History")
+        log_tools = ctk.CTkFrame(self.activity_tabs.tab("Log"), fg_color="transparent")
+        log_tools.pack(fill="x", padx=4, pady=(0, 4))
+        ctk.CTkLabel(log_tools, text="Private diagnostics · No credentials or message content",
+            anchor="w").pack(side="left")
+        ctk.CTkButton(log_tools, text="Open diagnostics", width=130,
+            command=self.open_diagnostics).pack(side="right", padx=4)
         self.log_box = ctk.CTkTextbox(self.activity_tabs.tab("Log"), height=90,
                                      font=("Courier", 11), state="disabled")
         self.log_box.pack(fill="both", expand=True)
@@ -399,7 +407,8 @@ class App(ctk.CTk):
     def _restore_preferences(self):
         try:
             saved = read_json(self._preferences_path(), {})
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError) as error:
+            record_issue('preferences_read_failed', error)
             saved = {}
         for key, attr, count in (("pane_weights", "_pane_weights", 3),
                                  ("split_weights", "_split_weights", 2)):
@@ -455,13 +464,18 @@ class App(ctk.CTk):
         saved["window_size"] = [self.winfo_width(), self.winfo_height()]
         try:
             write_json(self._preferences_path(), saved)
-        except OSError:
+        except OSError as error:
+            record_issue('preferences_save_failed', error)
             self.log("Could not save preferences. Check local folder permissions.")
 
     def _close_window(self):
+        record_issue('window_close_requested', level='INFO', active_job=self.busy)
+        if self.busy:
+            record_issue('closed_during_download', level='WARNING')
         if self._preferences_job is not None:
             self.after_cancel(self._preferences_job)
         self._save_preferences()
+        self._normal_close_requested = True
         self.destroy()
 
     def open_date_picker(self):
@@ -658,7 +672,8 @@ class App(ctk.CTk):
                 for name in ("api_id", "api_hash", "phone"):
                     getattr(self, name).insert(0, saved[name])
                 self.connection_status.configure(text="Saved connection details loaded")
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, ValueError, UnicodeError) as error:
+            record_issue('credentials_read_failed', error)
             self.connection_status.configure(text="Could not read saved connection details")
 
     def _connection_preference_changed(self):
@@ -669,7 +684,8 @@ class App(ctk.CTk):
         try:
             forget_connection_details()
             self.connection_status.configure(text="Connection details will not be saved")
-        except (OSError, ValueError):
+        except (OSError, ValueError) as error:
+            record_issue('credentials_forget_failed', error)
             self.connection_status.configure(text="Could not remove saved connection details")
 
     def _complete_authentication(self):
@@ -677,7 +693,8 @@ class App(ctk.CTk):
             try:
                 save_connection_details(*self._login_credentials)
                 self.connection_status.configure(text="Connection details saved privately")
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
+                record_issue('credentials_save_failed', error)
                 self.connection_status.configure(text="Could not save connection details")
                 self.log("Could not save connection details. Check local folder permissions.")
         self._login_credentials = None
@@ -692,7 +709,8 @@ class App(ctk.CTk):
                 getattr(self, name).delete(0, "end")
             self.connection_status.configure(text="Saved connection details removed")
             self._queue_preferences()
-        except (OSError, ValueError):
+        except (OSError, ValueError) as error:
+            record_issue('credentials_forget_failed', error)
             self.connection_status.configure(text="Could not remove saved connection details")
 
     def reset_selected_sync(self):
@@ -713,7 +731,8 @@ class App(ctk.CTk):
             return
         try:
             removed = reset_channel_sync(selected.id)
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError) as error:
+            record_issue('sync_reset_failed', error)
             self.progress_label.configure(text="Could not reset saved sync · Check local permissions")
             self.log("Could not reset saved sync. Check local state-file permissions.")
             return
@@ -727,6 +746,21 @@ class App(ctk.CTk):
 
     def log(self, msg):
         self.after(0, self._log_safe, msg)
+
+    def report_callback_exception(self, exc_type, error, tb):
+        record_issue('ui_callback_failed', error, tb=tb)
+        try:
+            self.progress_label.configure(text="Unexpected interface error · Open diagnostics in Activity > Log")
+        except Exception:
+            pass
+
+    def open_diagnostics(self):
+        try:
+            if open_diagnostics_folder():
+                return
+        except (OSError, ValueError) as error:
+            record_issue('diagnostics_open_failed', error)
+        self.progress_label.configure(text="Diagnostic logs unavailable · Check local permissions")
 
     def _log_safe(self, msg):
         self.log_box.configure(state="normal")
@@ -762,9 +796,11 @@ class App(ctk.CTk):
             self.log("Enter a valid numeric API ID.")
             return
         self.loop = asyncio.new_event_loop()
+        self.loop.set_exception_handler(async_exception_handler)
         try:
             self.downloader = TelegramDownloader(int(api_id), api_hash, phone)
-        except Exception:
+        except Exception as error:
+            record_issue('telegram_initialize_failed', error)
             self.log("Could not initialize Telegram. Check local session permissions.")
             self.loop.close()
             self.loop = None
@@ -773,7 +809,7 @@ class App(ctk.CTk):
         self.after(0, lambda: self.login_btn.configure(state="disabled"))
         self.log("🔄 Connecting to Telegram...")
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
-        asyncio.run_coroutine_threadsafe(self._async_login(), self.loop)
+        observe_future(asyncio.run_coroutine_threadsafe(self._async_login(), self.loop))
 
     async def _async_login(self):
         try:
@@ -794,7 +830,8 @@ class App(ctk.CTk):
             self.after(0, self._apply_channels, channels)
             self.log(f"📋 {len(channels)} channels & groups loaded.")
 
-        except Exception:
+        except Exception as error:
+            record_issue('login_failed', error)
             self.log("❌ Login failed. Check credentials and account authentication settings.")
             self.after(0, lambda: self.login_btn.configure(state="normal"))
         finally:
@@ -999,7 +1036,8 @@ class App(ctk.CTk):
             try:
                 topics = await self.downloader.get_topics(selected)
                 self.after(0, apply_topics, topics, None)
-            except Exception:
+            except Exception as error:
+                record_issue('topic_load_failed', error)
                 self.after(0, apply_topics, [], True)
         def apply_topics(topics, error):
             if generation != self.topic_generation:
@@ -1027,7 +1065,7 @@ class App(ctk.CTk):
                 check.pack(anchor="w", fill="x", padx=6, pady=4)
                 self.topic_checks[label] = (var, check)
             self.update_topic_count()
-        asyncio.run_coroutine_threadsafe(load(), self.loop)
+        observe_future(asyncio.run_coroutine_threadsafe(load(), self.loop))
 
     def _sender_query_changed(self, event):
         if self.busy or event.keysym in ("Return", "Up", "Down", "Escape"):
@@ -1089,9 +1127,10 @@ class App(ctk.CTk):
             try:
                 matches = await self.downloader.find_senders(selected, query)
                 self.after(0, apply, matches, False)
-            except Exception:
+            except Exception as error:
+                record_issue('sender_lookup_failed', error)
                 self.after(0, apply, [], True)
-        asyncio.run_coroutine_threadsafe(lookup(), self.loop)
+        observe_future(asyncio.run_coroutine_threadsafe(lookup(), self.loop))
 
     def choose_sender(self, label):
         if self.busy or label not in self.senders:
@@ -1222,6 +1261,7 @@ class App(ctk.CTk):
         folder = group_folder(self.folder_path.get(), selected.name, selected.id)
 
         base_folder = folder
+        record_issue('download_started', level='INFO', parallel_downloads=parallel_downloads)
         self.log("Starting download for the selected channel/topic...")
         self.busy = True
         self.sync_reset_btn.configure(state="disabled")
@@ -1306,11 +1346,15 @@ class App(ctk.CTk):
                     self.after(0, lambda: self.progress.set(1))
                 self.after(0, lambda: self.progress_label.configure(text=f"Download {status}"))
                 self.after(0, self._render_transfer, dict(totals, state=status))
-            except TopicFolderConflict:
+                record_issue('download_finished', level='INFO' if status == 'complete' else 'WARNING',
+                             result=status, **totals)
+            except TopicFolderConflict as error:
+                record_issue('topic_folder_conflict', error)
                 self.log("❌ Topic folder conflict. Check the destination for duplicate topic IDs or files blocking a topic folder.")
                 self.after(0, lambda: self.progress_label.configure(text="Topic folder conflict · Check Activity"))
                 self.after(0, self._render_transfer, dict(totals, state="failed"))
-            except Exception:
+            except Exception as error:
+                record_issue('download_failed', error)
                 self.log("❌ Download failed. Check connection and local file permissions.")
                 self.after(0, lambda: self.progress_label.configure(text="Download failed"))
                 self.after(0, self._render_transfer, dict(totals, state="failed"))
@@ -1338,10 +1382,11 @@ class App(ctk.CTk):
             self.start_btn.configure(state="normal")
             self.pause_btn.configure(state="disabled", text="⏸ Pause")
             self.cancel_btn.configure(state="disabled")
-        asyncio.run_coroutine_threadsafe(run_download(), self.loop)
+        observe_future(asyncio.run_coroutine_threadsafe(run_download(), self.loop))
 
     def pause(self):
         self.downloader.paused = not self.downloader.paused
+        record_issue('download_paused' if self.downloader.paused else 'download_resumed', level='INFO')
         label = "▶ Resume" if self.downloader.paused else "⏸ Pause"
         self.after(0, lambda: self.pause_btn.configure(text=label))
         self.progress_label.configure(text="Paused" if self.downloader.paused else "Downloading…")
@@ -1351,6 +1396,7 @@ class App(ctk.CTk):
 
     def cancel(self):
         self.downloader.cancelled = True
+        record_issue('download_cancelled', level='INFO')
         self._render_transfer(dict(self._last_transfer, state="cancelling"))
         self.log("⛔ Cancelling...")
         self.after(0, lambda: self.pause_btn.configure(state="disabled"))

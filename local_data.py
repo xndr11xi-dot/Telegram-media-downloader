@@ -2,15 +2,22 @@
 import json
 import os
 import tempfile
+from diagnostics import record_issue
 
 
 def read_json(path, default):
     try:
         with open(path, encoding="utf-8") as stream:
             data = json.load(stream)
-        return data if isinstance(data, type(default)) else default
-    except (FileNotFoundError, json.JSONDecodeError):
+        if isinstance(data, type(default)):
+            return data
+        record_issue('local_json_wrong_type', level='WARNING')
+        return default
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError as error:
         # Corrupt checkpoints cause a safe rescan, never a skipped download.
+        record_issue('local_json_invalid', error, level='WARNING')
         return default
 
 

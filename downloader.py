@@ -23,6 +23,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from local_data import read_json, write_json
+from diagnostics import record_issue
 
 # ── Incremental sync ──
 SYNC_FILE = "sync_state.json"
@@ -447,7 +448,8 @@ class TelegramDownloader:
                 save_last_id(channel.id, thread["high"], None, media_filter,
                              thread["folder"], sender_id, thread["identity"])
                 thread["saved"] = True
-            except Exception:
+            except Exception as error:
+                record_issue('discussion_checkpoint_save_failed', error)
                 thread["complete"] = complete = False
                 on_log("Could not save discussion sync. It can be retried without skipping unfinished files.")
 
@@ -468,7 +470,8 @@ class TelegramDownloader:
                     task.result()
                 except asyncio.CancelledError:
                     complete = False
-                except Exception:
+                except Exception as error:
+                    record_issue('worker_failed', error)
                     complete = False
                     on_log("A file could not be processed; unfinished sync was retained.")
 
@@ -546,6 +549,7 @@ class TelegramDownloader:
                     break
                 except FloodWaitError as error:
                     seconds = max(0, int(error.seconds))
+                    record_issue('telegram_wait', error, level='WARNING', wait_seconds=seconds)
                     cooldown_until = max(cooldown_until, time.monotonic() + seconds)
                     for item in active.values():
                         item["speed"] = 0.0
@@ -553,7 +557,9 @@ class TelegramDownloader:
                     on_log(f"Telegram requested a {seconds}s wait. Downloads will resume automatically.")
                     if not await ready():
                         break
-                except Exception:
+                except Exception as error:
+                    record_issue('media_download_failed', error, attempt=attempt + 1,
+                                 level='WARNING' if attempt < 4 else 'ERROR')
                     transfer.report("retrying" if attempt < 4 else "failed", force=True)
                     on_log(f"⚠ Download attempt {attempt + 1} failed.")
                     if attempt < 4 and not self.cancelled:
@@ -697,6 +703,7 @@ class TelegramDownloader:
                         thread_id = (getattr(reply, "reply_to_top_id", None)
                                      or getattr(reply, "reply_to_msg_id", None))
                         if comment.chat_id != marked_group_id or thread_id != root.id:
+                            record_issue('discussion_scope_mismatch', level='WARNING')
                             thread["complete"] = False
                             continue
                         comment_high = max(comment_high, comment.id)
@@ -709,7 +716,8 @@ class TelegramDownloader:
                     if not thread["complete"]:
                         complete = False
                         on_log(f"Discussion for post {message.id} was incomplete; its sync was not advanced.")
-                except Exception:
+                except Exception as error:
+                    record_issue('discussion_load_failed', error)
                     if thread is not None:
                         thread["complete"] = False
                         thread["enumerated"] = True
