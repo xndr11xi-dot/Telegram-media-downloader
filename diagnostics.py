@@ -36,6 +36,7 @@ EVENTS = {
     'local_json_invalid', 'local_json_wrong_type', 'download_started',
     'download_finished', 'download_paused', 'download_resumed', 'download_cancelled',
     'diagnostics_open_failed', 'diagnostic_state_failed', 'unclassified_issue',
+    'download_storage_full', 'partial_cleanup_failed',
 }
 _manager = None
 

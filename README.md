@@ -138,6 +138,16 @@ while another discussion is still downloading or has failed.
 Telegram-requested waits reported by file transfers pause new starts and retries
 for the requested duration; Activity reports Waiting for Telegram. Cancel also
 interrupts these waits. Retryable errors retain the existing five-attempt limit.
+
+When storage is full (`ENOSPC`, errno 28 on macOS) or a storage quota is exhausted,
+the run stops immediately instead of retrying the same files. Other parallel
+transfers and outstanding discussion reads are cancelled, and remaining topics
+are not started. Activity displays a storage-specific message and clears speed.
+Completed files remain in place; unfinished scans retain their previous sync
+positions. Partial files are removed when the filesystem permits, with a warning
+if cleanup is blocked. Free space on the drive selected in Download folder, then
+retry the same scope. A sync reset is not required to recover the missing files.
+
 Speed depends on file sizes, connection, disk/CPU and Telegram's limits, so more
 parallel files do not guarantee faster downloads. See the
 [Telethon FAQ](https://docs.telethon.dev/en/stable/quick-references/faq.html#file-download-is-slow-or-sending-files-takes-too-long)

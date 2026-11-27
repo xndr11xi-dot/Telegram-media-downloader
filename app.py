@@ -9,7 +9,10 @@ from local_data import (
     read_json, write_json, load_connection_details, save_connection_details,
     forget_connection_details,
 )
-from downloader import TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync
+from downloader import (
+    TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync,
+    is_storage_full, storage_full_message,
+)
 from telethon import utils
 from history import load_history, save_history
 from diagnostics import record_issue, observe_future, async_exception_handler, open_diagnostics_folder
@@ -1163,6 +1166,8 @@ class App(ctk.CTk):
                   "cancelling": "Cancelling", "skipping": "Already downloaded",
                   "retrying": "Retrying file", "failed": "Download failed",
                   "rate_limited": "Waiting for Telegram",
+                  "storage_full": "Storage full · Free space or choose another drive",
+                  "scope_storage_full": "Storage full · Free space or choose another drive",
                   "file_complete": "File saved", "scope_complete": "Selected source complete",
                   "scope_cancelled": "Cancelled", "scope_incomplete": "Some files failed",
                   "complete": "Download complete", "cancelled": "Download cancelled",
@@ -1192,7 +1197,8 @@ class App(ctk.CTk):
         if "parallel_limit" in details:
             combined = details.get("aggregate_speed", 0)
             if state in ("paused", "resuming", "cancelling", "rate_limited", "cancelled",
-                         "complete", "incomplete", "scope_complete", "scope_cancelled", "scope_incomplete"):
+                         "complete", "incomplete", "scope_complete", "scope_cancelled", "scope_incomplete",
+                         "storage_full", "scope_storage_full"):
                 combined = 0
             counts += (f" · {details.get('active', 0)}/{details['parallel_limit']} active"
                        f" · Combined {format_bytes(combined)}/s")
@@ -1354,10 +1360,17 @@ class App(ctk.CTk):
                 self.after(0, lambda: self.progress_label.configure(text="Topic folder conflict · Check Activity"))
                 self.after(0, self._render_transfer, dict(totals, state="failed"))
             except Exception as error:
-                record_issue('download_failed', error)
-                self.log("❌ Download failed. Check connection and local file permissions.")
-                self.after(0, lambda: self.progress_label.configure(text="Download failed"))
-                self.after(0, self._render_transfer, dict(totals, state="failed"))
+                if is_storage_full(error):
+                    record_issue('download_storage_full', error)
+                    message = storage_full_message(error.errno)
+                    self.log(message + ". Free space before retrying; unfinished sync was retained.")
+                    self.after(0, lambda text=message: self.progress_label.configure(text=text))
+                    self.after(0, self._render_transfer, dict(totals, state="storage_full"))
+                else:
+                    record_issue('download_failed', error)
+                    self.log("❌ Download failed. Check connection and local file permissions.")
+                    self.after(0, lambda: self.progress_label.configure(text="Download failed"))
+                    self.after(0, self._render_transfer, dict(totals, state="failed"))
             finally:
                 self.after(0, finish)
         def finish():
