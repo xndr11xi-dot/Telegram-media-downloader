@@ -9,7 +9,11 @@ from local_data import (
     read_json, write_json, load_connection_details, save_connection_details,
     forget_connection_details,
 )
-from downloader import TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync
+from downloader import (
+    TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync,
+    is_storage_full, storage_full_message,
+    DEFAULT_PARALLEL_DOWNLOADS, MAX_PARALLEL_DOWNLOADS, PARALLEL_DOWNLOAD_VALUES,
+)
 from telethon import utils
 from history import load_history, save_history
 from diagnostics import record_issue, observe_future, async_exception_handler, open_diagnostics_folder
@@ -234,11 +238,11 @@ class App(ctk.CTk):
                                          wraplength=280, justify="left", anchor="w")
         self.sender_status.pack(fill="x", padx=12, pady=(4, 8))
         ctk.CTkLabel(settings, text="Parallel downloads").pack(anchor="w", padx=12, pady=(6, 0))
-        self.parallel_downloads = ctk.StringVar(value="2")
-        self.parallel_menu = ctk.CTkOptionMenu(settings, values=["1", "2", "3", "4"],
+        self.parallel_downloads = ctk.StringVar(value=str(DEFAULT_PARALLEL_DOWNLOADS))
+        self.parallel_menu = ctk.CTkOptionMenu(settings, values=list(PARALLEL_DOWNLOAD_VALUES),
                                               variable=self.parallel_downloads)
         self.parallel_menu.pack(fill="x", padx=12, pady=(2, 4))
-        ctk.CTkLabel(settings, text="Files at once · Choose 1 for a single download",
+        ctk.CTkLabel(settings, text="Files at once · More files share your connection and drive",
             wraplength=280, justify="left", anchor="w").pack(fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(settings, text="Media types").pack(anchor="w", padx=12, pady=(8, 0))
         quick_row = ctk.CTkFrame(settings, fg_color="transparent")
@@ -435,7 +439,7 @@ class App(ctk.CTk):
         if mode in ("all", "10", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
         parallel = saved.get("parallel_downloads")
-        if parallel in ("1", "2", "3", "4"):
+        if parallel in PARALLEL_DOWNLOAD_VALUES:
             self.parallel_downloads.set(parallel)
         for name in ("reverse", "all_media", "remember_connection", "include_discussions"):
             if type(saved.get(name)) is bool:
@@ -1163,6 +1167,8 @@ class App(ctk.CTk):
                   "cancelling": "Cancelling", "skipping": "Already downloaded",
                   "retrying": "Retrying file", "failed": "Download failed",
                   "rate_limited": "Waiting for Telegram",
+                  "storage_full": "Storage full · Free space or choose another drive",
+                  "scope_storage_full": "Storage full · Free space or choose another drive",
                   "file_complete": "File saved", "scope_complete": "Selected source complete",
                   "scope_cancelled": "Cancelled", "scope_incomplete": "Some files failed",
                   "complete": "Download complete", "cancelled": "Download cancelled",
@@ -1192,7 +1198,8 @@ class App(ctk.CTk):
         if "parallel_limit" in details:
             combined = details.get("aggregate_speed", 0)
             if state in ("paused", "resuming", "cancelling", "rate_limited", "cancelled",
-                         "complete", "incomplete", "scope_complete", "scope_cancelled", "scope_incomplete"):
+                         "complete", "incomplete", "scope_complete", "scope_cancelled", "scope_incomplete",
+                         "storage_full", "scope_storage_full"):
                 combined = 0
             counts += (f" · {details.get('active', 0)}/{details['parallel_limit']} active"
                        f" · Combined {format_bytes(combined)}/s")
@@ -1204,8 +1211,8 @@ class App(ctk.CTk):
             return
         selected = self.selected_channel()
         raw_parallel = self.parallel_downloads.get()
-        if raw_parallel not in ("1", "2", "3", "4"):
-            self.progress_label.configure(text="Choose 1–4 parallel downloads")
+        if raw_parallel not in PARALLEL_DOWNLOAD_VALUES:
+            self.progress_label.configure(text=f"Choose 1–{MAX_PARALLEL_DOWNLOADS} parallel downloads")
             return
         parallel_downloads = int(raw_parallel)
         include_discussions = bool(self.include_discussions.get()
@@ -1354,10 +1361,17 @@ class App(ctk.CTk):
                 self.after(0, lambda: self.progress_label.configure(text="Topic folder conflict · Check Activity"))
                 self.after(0, self._render_transfer, dict(totals, state="failed"))
             except Exception as error:
-                record_issue('download_failed', error)
-                self.log("❌ Download failed. Check connection and local file permissions.")
-                self.after(0, lambda: self.progress_label.configure(text="Download failed"))
-                self.after(0, self._render_transfer, dict(totals, state="failed"))
+                if is_storage_full(error):
+                    record_issue('download_storage_full', error)
+                    message = storage_full_message(error.errno)
+                    self.log(message + ". Free space before retrying; unfinished sync was retained.")
+                    self.after(0, lambda text=message: self.progress_label.configure(text=text))
+                    self.after(0, self._render_transfer, dict(totals, state="storage_full"))
+                else:
+                    record_issue('download_failed', error)
+                    self.log("❌ Download failed. Check connection and local file permissions.")
+                    self.after(0, lambda: self.progress_label.configure(text="Download failed"))
+                    self.after(0, self._render_transfer, dict(totals, state="failed"))
             finally:
                 self.after(0, finish)
         def finish():

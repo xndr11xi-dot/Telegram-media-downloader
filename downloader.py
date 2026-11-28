@@ -15,6 +15,7 @@ from telethon.tl.types import (
     User, Channel, PeerChannel,
 )
 import asyncio
+import errno
 import os
 import json
 import hashlib
@@ -27,10 +28,31 @@ from diagnostics import record_issue
 
 # ── Incremental sync ──
 SYNC_FILE = "sync_state.json"
+DEFAULT_PARALLEL_DOWNLOADS = 2
+MAX_PARALLEL_DOWNLOADS = 16
+PARALLEL_DOWNLOAD_VALUES = tuple(str(number) for number in range(1, MAX_PARALLEL_DOWNLOADS + 1))
 
 
 class TopicFolderConflict(FileExistsError):
     pass
+
+
+def is_storage_full(error):
+    quota = getattr(errno, 'EDQUOT', None)
+    return isinstance(error, OSError) and (error.errno == errno.ENOSPC
+        or (quota is not None and error.errno == quota))
+
+
+def storage_full_message(code):
+    if getattr(errno, 'EDQUOT', None) is not None and code == errno.EDQUOT:
+        return "Storage quota exceeded · Free space or choose another drive"
+    return "No space left on device · Free space or choose another drive"
+
+
+class DownloadStorageFull(OSError):
+    def __init__(self, code):
+        super().__init__(code, storage_full_message(code))
+
 
 def sync_key(channel_id, topic_id=None, media_filter=None, folder=None, sender_id=None, discussion=None):
     filters = sorted(set(x.strip().lower() for x in (media_filter or "all").split(",")))
@@ -350,9 +372,9 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False, parallel_downloads=2):
-        if type(parallel_downloads) is not int or not 1 <= parallel_downloads <= 4:
-            raise ValueError("Choose between 1 and 4 parallel downloads")
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False, parallel_downloads=DEFAULT_PARALLEL_DOWNLOADS):
+        if type(parallel_downloads) is not int or not 1 <= parallel_downloads <= MAX_PARALLEL_DOWNLOADS:
+            raise ValueError(f"Choose between 1 and {MAX_PARALLEL_DOWNLOADS} parallel downloads")
         if sender_id is not None and (type(sender_id) is not int or sender_id == 0):
             raise ValueError("Select a valid sender ID")
         forum = bool(getattr(channel.entity, "forum", False))
@@ -382,6 +404,8 @@ class TelegramDownloader:
         reserved = set()
         active = {}
         cooldown_until = 0.0
+        storage_errno = None
+        scan_task = None
 
         def notify(state, **details):
             nonlocal last_skip_report
@@ -394,7 +418,7 @@ class TelegramDownloader:
                 last_skip_report = now
             aggregate = sum(item.get("speed", 0) for item in active.values()
                             if item.get("state") == "downloading")
-            if self.paused or self.cancelled or time.monotonic() < cooldown_until:
+            if self.paused or self.cancelled or storage_errno is not None or time.monotonic() < cooldown_until:
                 aggregate = 0.0
             on_transfer(dict(state=state, downloaded=count, skipped=skipped,
                              limit=file_limit, active=len(active), parallel_limit=parallel_downloads,
@@ -432,17 +456,36 @@ class TelegramDownloader:
             on_log("💬 Including discussions only for channel messages in this download scope.")
 
         async def ready():
-            while not self.cancelled:
+            while not self.cancelled and storage_errno is None:
                 delay = cooldown_until - time.monotonic()
                 if not self.paused and delay <= 0:
                     return True
                 await asyncio.sleep(min(0.1, delay) if delay > 0 else 0.5)
-            return not self.cancelled
+            return False
+
+        def stop_for_storage(error):
+            nonlocal storage_errno, complete
+            if not is_storage_full(error):
+                return False
+            if storage_errno is None:
+                storage_errno = error.errno
+                complete = False
+                # Stop reads as well as writes, without treating a disk error as a user Cancel.
+                current = asyncio.current_task()
+                for task in pending:
+                    if task is not current:
+                        task.cancel()
+                if scan_task is not None and scan_task is not current:
+                    scan_task.cancel()
+                record_issue('download_storage_full', error)
+                on_log(storage_full_message(storage_errno) + ". Download stopped; unfinished sync was retained.")
+                notify('storage_full')
+            return True
 
         def finish_thread(thread):
             nonlocal complete
             if (not thread["enumerated"] or thread["pending"] or thread["saved"]
-                    or not thread["complete"] or self.cancelled or not use_checkpoint):
+                    or not thread["complete"] or self.cancelled or storage_errno is not None or not use_checkpoint):
                 return
             try:
                 save_last_id(channel.id, thread["high"], None, media_filter,
@@ -451,11 +494,13 @@ class TelegramDownloader:
             except Exception as error:
                 record_issue('discussion_checkpoint_save_failed', error)
                 thread["complete"] = complete = False
+                if stop_for_storage(error):
+                    return
                 on_log("Could not save discussion sync. It can be retried without skipping unfinished files.")
 
         async def reap(wait=False):
             nonlocal complete
-            if self.cancelled:
+            if self.cancelled or storage_errno is not None:
                 for task in pending:
                     task.cancel()
             if not pending:
@@ -479,7 +524,7 @@ class TelegramDownloader:
             # A timer keeps cancellation responsive even if a network read stalls.
             tick = asyncio.Event()
             while True:
-                if self.cancelled:
+                if self.cancelled or storage_errno is not None:
                     for task in pending:
                         task.cancel()
                     return
@@ -558,6 +603,8 @@ class TelegramDownloader:
                     if not await ready():
                         break
                 except Exception as error:
+                    if stop_for_storage(error):
+                        break
                     record_issue('media_download_failed', error, attempt=attempt + 1,
                                  level='WARNING' if attempt < 4 else 'ERROR')
                     transfer.report("retrying" if attempt < 4 else "failed", force=True)
@@ -566,14 +613,21 @@ class TelegramDownloader:
                         await asyncio.sleep(1)
                 finally:
                     if temporary is not None:
-                        os.unlink(temporary)
+                        try:
+                            os.unlink(temporary)
+                        except FileNotFoundError:
+                            pass
+                        except OSError as error:
+                            record_issue('partial_cleanup_failed', error)
+                            if not stop_for_storage(error):
+                                on_log("Could not remove an interrupted temporary file. Check destination permissions.")
             if succeeded:
                 # Reporting failures must never retry a file already committed.
                 transfer.report("file_complete", force=True)
                 fraction = 0.0 if not file_limit else min(count / file_limit, 1.0)
                 on_log(f"✅ [{count}/{file_limit or '∞'}] {filename}")
                 on_progress(count, skipped, fraction)
-            elif not self.cancelled:
+            elif not self.cancelled and storage_errno is None:
                 on_log(f"❌ Could not download message {message.id}; sync not advanced.")
             return succeeded
 
@@ -645,7 +699,8 @@ class TelegramDownloader:
             ):
                 if not await ready():
                     complete = False
-                    on_log("⛔ Download cancelled.")
+                    if self.cancelled:
+                        on_log("⛔ Download cancelled.")
                     break
                 if not message_in_topic(message, topic_id):
                     continue
@@ -721,6 +776,8 @@ class TelegramDownloader:
                     if thread is not None:
                         thread["complete"] = False
                         thread["enumerated"] = True
+                    if stop_for_storage(error):
+                        return
                     # Access can differ between a channel and its linked group.
                     complete = False
                     on_log(f"⚠ Could not load discussion for post {message.id}. "
@@ -729,15 +786,22 @@ class TelegramDownloader:
                     break
 
         watcher = asyncio.create_task(watch_cancel())
+        scan_task = asyncio.create_task(scan())
         try:
-            await scan()
+            try:
+                await scan_task
+            except asyncio.CancelledError:
+                if storage_errno is None:
+                    raise
             while pending:
                 await reap(wait=True)
         finally:
             watcher.cancel()
+            if not scan_task.done():
+                scan_task.cancel()
             for task in pending:
                 task.cancel()
-            await asyncio.gather(watcher, *pending, return_exceptions=True)
+            await asyncio.gather(watcher, scan_task, *pending, return_exceptions=True)
             pending.clear()
 
         if file_limit and count >= file_limit:
@@ -746,7 +810,20 @@ class TelegramDownloader:
             on_log("No post discussions with replies were found in this download scope.")
 
         if complete and not self.cancelled and use_checkpoint:
-            save_last_id(channel.id, high_id, topic_id, media_filter, folder, sender_id)
+            try:
+                save_last_id(channel.id, high_id, topic_id, media_filter, folder, sender_id)
+            except OSError as error:
+                if not stop_for_storage(error):
+                    raise
+        if storage_errno is not None:
+            # Report committed files even if history saving also fails on the full disk.
+            for callback in (lambda: on_done(count, skipped), lambda: notify('scope_storage_full')):
+                try:
+                    callback()
+                except Exception as error:
+                    record_issue('download_failed', error)
+            raise DownloadStorageFull(storage_errno)
+
         if not complete or self.cancelled:
             on_log("Download stopped; unfinished scopes kept their previous sync positions.")
         on_done(count, skipped)

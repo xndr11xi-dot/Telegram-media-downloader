@@ -8,7 +8,7 @@ A privacy-focused desktop app to bulk download media from your Telegram channels
 - Search forum topics and select one or more with checkboxes
 - 🗂 Combine file type checkboxes — Photos, Videos, Audio, PDF, Word, Excel, ZIP, or any custom extension
 - 🔢 Choose Last 10, 20, 50, 100, All, or a custom limit
-- ⚡ Download 1–4 files at once with a remembered parallel-download setting
+- ⚡ Download 1–16 files at once with a remembered parallel-download setting
 - 📅 Choose download order — Newest first or Oldest first
 - 📁 Browse and select your download folder
 - ⏸ Pause, resume, and cancel downloads anytime
@@ -116,10 +116,15 @@ Start / Pause / Cancel controls stay available at the bottom.
 ## Parallel downloads
 
 Choose **Parallel downloads** in Download settings. The default is **2** files at
-once; choose **1** for sequential transfers or **3–4** for more overlap. The app
+once; choose **1** for sequential transfers or up to **16** for more overlap. The app
 remembers the selection and locks it while a run is active. Parallelism is across
 files, using the same Telegram connection and download quality. It does not split
 one file into multiple downloads or create extra sessions.
+
+The maximum is an application guard, not a published Telegram concurrency limit.
+Higher values share the same bandwidth, CPU and destination drive and can lead
+to more Telegram-requested waits. Compare the combined speed at different values
+to choose a setting for your connection; a higher count does not ensure higher speed.
 
 The queue selects files in the chosen order, but parallel files can finish in a
 different order. Each topic retains its own limit. Pending transfers reserve file
@@ -138,6 +143,16 @@ while another discussion is still downloading or has failed.
 Telegram-requested waits reported by file transfers pause new starts and retries
 for the requested duration; Activity reports Waiting for Telegram. Cancel also
 interrupts these waits. Retryable errors retain the existing five-attempt limit.
+
+When storage is full (`ENOSPC`, errno 28 on macOS) or a storage quota is exhausted,
+the run stops immediately instead of retrying the same files. Other parallel
+transfers and outstanding discussion reads are cancelled, and remaining topics
+are not started. Activity displays a storage-specific message and clears speed.
+Completed files remain in place; unfinished scans retain their previous sync
+positions. Partial files are removed when the filesystem permits, with a warning
+if cleanup is blocked. Free space on the drive selected in Download folder, then
+retry the same scope. A sync reset is not required to recover the missing files.
+
 Speed depends on file sizes, connection, disk/CPU and Telegram's limits, so more
 parallel files do not guarantee faster downloads. See the
 [Telethon FAQ](https://docs.telethon.dev/en/stable/quick-references/faq.html#file-download-is-slow-or-sending-files-takes-too-long)
