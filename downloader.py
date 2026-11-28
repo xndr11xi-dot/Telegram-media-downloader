@@ -28,6 +28,9 @@ from diagnostics import record_issue
 
 # ── Incremental sync ──
 SYNC_FILE = "sync_state.json"
+DEFAULT_PARALLEL_DOWNLOADS = 2
+MAX_PARALLEL_DOWNLOADS = 16
+PARALLEL_DOWNLOAD_VALUES = tuple(str(number) for number in range(1, MAX_PARALLEL_DOWNLOADS + 1))
 
 
 class TopicFolderConflict(FileExistsError):
@@ -369,9 +372,9 @@ class TelegramDownloader:
 
         return False
 
-    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False, parallel_downloads=2):
-        if type(parallel_downloads) is not int or not 1 <= parallel_downloads <= 4:
-            raise ValueError("Choose between 1 and 4 parallel downloads")
+    async def download(self, channel, folder, media_filter, limit_mode, custom_limit, reverse, on_progress, on_log, on_done, topic_id=None, reset_controls=True, cutoff_date=None, on_transfer=None, sender_id=None, include_discussions=False, parallel_downloads=DEFAULT_PARALLEL_DOWNLOADS):
+        if type(parallel_downloads) is not int or not 1 <= parallel_downloads <= MAX_PARALLEL_DOWNLOADS:
+            raise ValueError(f"Choose between 1 and {MAX_PARALLEL_DOWNLOADS} parallel downloads")
         if sender_id is not None and (type(sender_id) is not int or sender_id == 0):
             raise ValueError("Select a valid sender ID")
         forum = bool(getattr(channel.entity, "forum", False))

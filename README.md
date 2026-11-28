@@ -8,7 +8,7 @@ A privacy-focused desktop app to bulk download media from your Telegram channels
 - Search forum topics and select one or more with checkboxes
 - 🗂 Combine file type checkboxes — Photos, Videos, Audio, PDF, Word, Excel, ZIP, or any custom extension
 - 🔢 Choose Last 10, 20, 50, 100, All, or a custom limit
-- ⚡ Download 1–4 files at once with a remembered parallel-download setting
+- ⚡ Download 1–16 files at once with a remembered parallel-download setting
 - 📅 Choose download order — Newest first or Oldest first
 - 📁 Browse and select your download folder
 - ⏸ Pause, resume, and cancel downloads anytime
@@ -116,10 +116,15 @@ Start / Pause / Cancel controls stay available at the bottom.
 ## Parallel downloads
 
 Choose **Parallel downloads** in Download settings. The default is **2** files at
-once; choose **1** for sequential transfers or **3–4** for more overlap. The app
+once; choose **1** for sequential transfers or up to **16** for more overlap. The app
 remembers the selection and locks it while a run is active. Parallelism is across
 files, using the same Telegram connection and download quality. It does not split
 one file into multiple downloads or create extra sessions.
+
+The maximum is an application guard, not a published Telegram concurrency limit.
+Higher values share the same bandwidth, CPU and destination drive and can lead
+to more Telegram-requested waits. Compare the combined speed at different values
+to choose a setting for your connection; a higher count does not ensure higher speed.
 
 The queue selects files in the chosen order, but parallel files can finish in a
 different order. Each topic retains its own limit. Pending transfers reserve file

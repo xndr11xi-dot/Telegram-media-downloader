@@ -12,6 +12,7 @@ from local_data import (
 from downloader import (
     TelegramDownloader, group_folder, topic_folder, TopicFolderConflict, reset_channel_sync,
     is_storage_full, storage_full_message,
+    DEFAULT_PARALLEL_DOWNLOADS, MAX_PARALLEL_DOWNLOADS, PARALLEL_DOWNLOAD_VALUES,
 )
 from telethon import utils
 from history import load_history, save_history
@@ -237,11 +238,11 @@ class App(ctk.CTk):
                                          wraplength=280, justify="left", anchor="w")
         self.sender_status.pack(fill="x", padx=12, pady=(4, 8))
         ctk.CTkLabel(settings, text="Parallel downloads").pack(anchor="w", padx=12, pady=(6, 0))
-        self.parallel_downloads = ctk.StringVar(value="2")
-        self.parallel_menu = ctk.CTkOptionMenu(settings, values=["1", "2", "3", "4"],
+        self.parallel_downloads = ctk.StringVar(value=str(DEFAULT_PARALLEL_DOWNLOADS))
+        self.parallel_menu = ctk.CTkOptionMenu(settings, values=list(PARALLEL_DOWNLOAD_VALUES),
                                               variable=self.parallel_downloads)
         self.parallel_menu.pack(fill="x", padx=12, pady=(2, 4))
-        ctk.CTkLabel(settings, text="Files at once · Choose 1 for a single download",
+        ctk.CTkLabel(settings, text="Files at once · More files share your connection and drive",
             wraplength=280, justify="left", anchor="w").pack(fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(settings, text="Media types").pack(anchor="w", padx=12, pady=(8, 0))
         quick_row = ctk.CTkFrame(settings, fg_color="transparent")
@@ -438,7 +439,7 @@ class App(ctk.CTk):
         if mode in ("all", "10", "20", "50", "100", "custom"):
             self.limit_mode.set(mode)
         parallel = saved.get("parallel_downloads")
-        if parallel in ("1", "2", "3", "4"):
+        if parallel in PARALLEL_DOWNLOAD_VALUES:
             self.parallel_downloads.set(parallel)
         for name in ("reverse", "all_media", "remember_connection", "include_discussions"):
             if type(saved.get(name)) is bool:
@@ -1210,8 +1211,8 @@ class App(ctk.CTk):
             return
         selected = self.selected_channel()
         raw_parallel = self.parallel_downloads.get()
-        if raw_parallel not in ("1", "2", "3", "4"):
-            self.progress_label.configure(text="Choose 1–4 parallel downloads")
+        if raw_parallel not in PARALLEL_DOWNLOAD_VALUES:
+            self.progress_label.configure(text=f"Choose 1–{MAX_PARALLEL_DOWNLOADS} parallel downloads")
             return
         parallel_downloads = int(raw_parallel)
         include_discussions = bool(self.include_discussions.get()
